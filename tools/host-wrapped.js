@@ -61,6 +61,8 @@ customApi: { baseUrl: '', apiKey: '', model: '' } }, scanDirs: [] }
     // 容错读取文本：fs.readText 会把含 NUL 字节的文件判定为二进制拒绝读取（FS_NOT_TEXT），
     // 而 PDF 提取产物常带 NUL/控制字符。此函数优先 readText，失败则 readBytes 原始字节，
     // 手工做 UTF-8 容错解码，并过滤 NUL 与控制字符（保留 \n \t \r）。
+    // 参数接受两种形式：已 resolve 的 target 对象（{targetKey,displayPath}），或原始路径字符串。
+    // 注意：fs.resolve 只接受路径字符串，若对 target 对象再次 resolve 会得到垃圾路径。
     function decodeBytesTolerant(bytes) {
       let out = ''
       let i = 0
@@ -92,10 +94,11 @@ customApi: { baseUrl: '', apiKey: '', model: '' } }, scanDirs: [] }
       }
       return res
     }
-    async function readTextTolerant(absPath) {
+    async function readTextTolerant(targetOrPath) {
       if (!fs) return ''
       try {
-        const target = await fs.resolve(absPath); const info = await fs.stat(target); if (!info) return ''
+        let target = targetOrPath
+        if (typeof targetOrPath === 'string') target = await fs.resolve(targetOrPath)
         try { return await fs.readText(target) } catch (e) {}
         const bytes = await fs.readBytes(target, undefined, 64 * 1024 * 1024)
         return decodeBytesTolerant(bytes)
@@ -1048,6 +1051,12 @@ updatedAt: new Date().toISOString() }
       const dir = await dataDir()
       if (target.toLowerCase() === dir.toLowerCase()) return { ok: false, message: '目标目录与当前目录相同' }
       if (!shell) return { ok: false, message: 'shell 服务不可用' }
+      // 预检：插件的 fs/shell 沙箱（workspace-write）只允许写入 workspaceRoot 及系统临时目录。
+      // 迁移目标必须位于这些可写根内，否则写 config.json 会被沙箱拒绝（FS_SANDBOX_DENIED）。
+      const targetNorm0 = target.replace(/[\\/]+$/, '')
+      const wsRoot = workspaceRoot ? String(workspaceRoot).replace(/[\\/]+$/, '') : ''
+      const okTarget = !wsRoot || targetNorm0.toLowerCase() === wsRoot.toLowerCase() || targetNorm0.toLowerCase().startsWith(wsRoot.toLowerCase() + '\\') || targetNorm0.toLowerCase().startsWith(wsRoot.toLowerCase() + '/')
+      if (!okTarget) return { ok: false, message: '目标目录不在插件可写范围内：当前会话沙箱（workspace-write）只允许数据目录位于工作区根 ' + wsRoot + ' 或其子目录（或系统临时目录）。请选择 ' + wsRoot + ' 下的目录作为新数据目录。' }
       const targetNorm = target.replace(/[\\/]+$/, '')
       try {
         await ensureDir(targetNorm)
