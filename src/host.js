@@ -480,7 +480,7 @@ return {
       if (!Array.isArray(rawParams)) return []
       return rawParams.map((p) => ({ name: String((p && p.name) || '').slice(0, 60), value: String((p && p.value) || '').slice(0, 60), unit: String((p && p.unit) || '').slice(0, 20), desc: String((p && p.desc) || '').slice(0, 200) })).filter((p) => p.name)
     }
-    function validCategory(c) { return typeof c === 'string' && CATEGORIES.indexOf(c) >= 0 ? c : '' }
+    function validCategory(c) { return typeof c === 'string' ? c.slice(0, 20) : '' }
 
     // ---- 模板（M2） ----
     function normalizeSections(input) {
@@ -695,7 +695,7 @@ return {
           if (ocrLen > 30) { parsed.textLen = ocrLen; ocrDone = true }
         }
       }
-      const item = { id: id, type: 'upload', name: args.name || safeName, title: args.name || safeName, manufacturer: args.manufacturer || '', model: args.model || '', category: args.category && CATEGORIES.indexOf(args.category) >= 0 ? args.category : '其他', tags: Array.isArray(args.tags) ? args.tags : [], params: [], summary: '', sourceFiles: [safeName], lang: '', ocr: ocrDone, textLen: parsed.textLen || 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+      const item = { id: id, type: 'upload', name: args.name || safeName, title: args.name || safeName, manufacturer: args.manufacturer || '', model: args.model || '', category: args.category ? String(args.category).slice(0, 20) : '其他', tags: Array.isArray(args.tags) ? args.tags : [], params: [], summary: '', sourceFiles: [safeName], lang: '', ocr: ocrDone, textLen: parsed.textLen || 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
       await writeItem(item)
       try { const t = await fs.resolve(joinPath(outdir, 'upload.b64')); await fs.writeText(t, '') } catch (e) {}
       markDirty()
@@ -721,7 +721,7 @@ return {
     }
     async function createManual(args) {
       const id = 'kb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-      const item = { id: id, type: 'manual', name: args.name || '未命名', title: args.name || '未命名', manufacturer: args.manufacturer || '', model: args.model || '', category: args.category && CATEGORIES.indexOf(args.category) >= 0 ? args.category : '其他', tags: Array.isArray(args.tags) ? args.tags : [], params: Array.isArray(args.params) ? args.params.map((p) => ({ name: String(p.name || ''), value: String(p.value || ''), unit: String(p.unit || ''), desc: String(p.desc || '') })) : [], summary: args.summary || '', sourceFiles: [], lang: '', textLen: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+      const item = { id: id, type: 'manual', name: args.name || '未命名', title: args.name || '未命名', manufacturer: args.manufacturer || '', model: args.model || '', category: args.category ? String(args.category).slice(0, 20) : '其他', tags: Array.isArray(args.tags) ? args.tags : [], params: Array.isArray(args.params) ? args.params.map((p) => ({ name: String(p.name || ''), value: String(p.value || ''), unit: String(p.unit || ''), desc: String(p.desc || '') })) : [], summary: args.summary || '', sourceFiles: [], lang: '', textLen: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
       await writeItem(item); markDirty()
       return { ok: true, item: slim(item) }
     }
@@ -729,7 +729,7 @@ return {
       const item = await readItem(args && args.id); if (!item) return { ok: false, message: '条目不存在' }
       const patch = (args && args.patch) || {}
       for (const k of ['name', 'title', 'manufacturer', 'model', 'category', 'tags', 'params', 'summary']) { if (patch[k] !== undefined) item[k] = patch[k] }
-      if (item.category && CATEGORIES.indexOf(item.category) < 0) item.category = '其他'
+      if (!item.category) item.category = '其他'
       item.updatedAt = new Date().toISOString(); await writeItem(item); markDirty()
       return { ok: true, item: slim(item) }
     }
@@ -773,7 +773,7 @@ return {
       if (!text) return { ok: false, message: '该条目无可抽取的文本' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是水下机器人（ROV/AUV）领域的资深技术文档分析助手。你擅长识别不同型号并提取结构化技术参数、撰写精炼摘要。你的回答必须只包含一个 JSON 对象。'
-      const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "导航定位|推进动力|通信遥测|能源电池|水密耐压|作业工具|通用设备|其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本：\n' + text
+      const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本：\n' + text
       const res = await llmText(route, system, userPrompt, 6000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const effective = res.text || res.reasoning || ''
@@ -1016,16 +1016,27 @@ return {
       const devices = items.filter((it) => (it.model || it.name) && (it.params || []).length).slice(0, 40).map((it) => ({ id: it.id, name: it.name || '', model: it.model || '', manufacturer: it.manufacturer || '', category: it.category || '', params: (it.params || []).slice(0, 10).map((p) => p.name + ' ' + (p.value || '') + (p.unit || '')).join('、'), summary: (it.summary || '').slice(0, 120) }))
       const machine = proj.machineType || (proj.robotSpec && proj.robotSpec.machineType) || 'ROV'
       const system = '你是水下机器人（ROV/AUV）总体设计专家。你擅长为项目确定合理的机器人基本参数与传感器搭载方案。你的回答必须只包含一个 JSON 对象。'
-      const userPrompt = '请为以下水下机器人项目确定基本参数和传感器搭载方案（AI 初稿，供人工复核修改）。\n项目：' + proj.title + '\n主题：' + (proj.topic || '（无）') + '\n机型：' + machine + '\n\n1. 基本参数 params：给出 8-16 项关键参数（如最大作业深度、最大航速、排水量/空气中重量、外形尺寸、推进器配置、供电方式/电池容量、脐带缆长度、通信方式、最大载荷、工作温度等），格式 [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}]。\n2. 传感器搭载 sensors：结合下列知识库可用设备，为完成项目任务选择 5-15 项传感器/设备，格式 [{"name": "设备名", "model": "型号", "manufacturer": "厂家", "category": "分类", "count": 数量, "purpose": "搭载用途"}]，务必从知识库设备中选择（含 id 用 "itemId" 字段）。\n\n知识库可用设备：\n' + JSON.stringify(devices) + '\n\n输出 JSON：{"params": [...], "sensors": [{"itemId": "", "name": "", "model": "", "manufacturer": "", "category": "", "count": 1, "purpose": ""}]}'
+      const userPrompt = '请为以下水下机器人项目确定基本参数和传感器搭载方案（AI 初稿，供人工复核修改）。\n项目：' + proj.title + '\n主题：' + (proj.topic || '（无）') + '\n机型：' + machine + '\n\n1. 基本参数 params：给出 8-16 项关键参数（如最大作业深度、最大航速、排水量/空气中重量、外形尺寸、推进器配置、供电方式/电池容量、脐带缆长度、通信方式、最大载荷、工作温度等），格式 [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}]。\n2. 传感器搭载 sensors：结合下列知识库可用设备，为完成项目任务选择 5-15 项传感器/设备，格式 [{"name": "设备名", "model": "型号", "manufacturer": "厂家", "category": "分类", "count": 数量, "purpose": "搭载用途"}]，务必从知识库设备中选择（含 id 用 "itemId" 字段）。\n\n【重要规则】相同类型的传感器一般只安装一台（count=1），不要重复选择同类设备（例如二维声呐只装一台、深度计只装一台）；执行单元如推进器、机械手、云台可按实际需要多台（count 可为 2-8）。\n\n知识库可用设备：\n' + JSON.stringify(devices) + '\n\n输出 JSON：{"params": [...], "sensors": [{"itemId": "", "name": "", "model": "", "manufacturer": "", "category": "", "count": 1, "purpose": ""}]}'
       const res = await llmText(route, system, userPrompt, 8000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const parsed = parseModelJson(res.text || res.reasoning || '')
       if (!parsed) return { ok: false, message: '初稿生成失败，请重试' }
       const params = (Array.isArray(parsed.params) ? parsed.params : []).filter((p) => p && p.name).slice(0, 20).map((p) => ({ name: String(p.name || '').slice(0, 60), value: String(p.value || '').slice(0, 40), unit: String(p.unit || '').slice(0, 20), desc: String(p.desc || '').slice(0, 200) }))
-      const sensors = (Array.isArray(parsed.sensors) ? parsed.sensors : []).filter((s) => s && (s.name || s.itemId)).slice(0, 20).map((s) => {
+      const rawSensors = (Array.isArray(parsed.sensors) ? parsed.sensors : []).filter((s) => s && (s.name || s.itemId)).slice(0, 20).map((s) => {
         const dev = devices.find((d) => d.id === s.itemId) || null
         return { itemId: String(s.itemId || ''), name: String(s.name || (dev && dev.name) || '').slice(0, 80), model: String(s.model || (dev && dev.model) || '').slice(0, 60), manufacturer: String(s.manufacturer || (dev && dev.manufacturer) || '').slice(0, 60), category: String(s.category || (dev && dev.category) || '其他').slice(0, 20), count: Math.max(1, parseInt(s.count, 10) || 1), purpose: String(s.purpose || '').slice(0, 200) }
       })
+      // 同类传感器去重：测量/探测类（导航定位|通信遥测|能源电池|通用设备|声呐|深度计|传感器等）按名称去重，只保留一台 count=1；执行单元（推进|作业工具|机械|云台|灯）保留
+      const sensorLike = (c, n) => /导航定位|通信遥测|能源电池|通用设备/.test(c || '') || /声呐|声纳|深度计|传感器|罗经|换能器|摄像机|相机|惯导|信标|定位|测深|测速|DVL|探照灯|灯/.test(n || '')
+      const seen = new Set(); const sensors = []
+      for (const s of rawSensors) {
+        const key = (s.name || '').trim() || (s.model || '').trim()
+        if (sensorLike(s.category, s.name)) {
+          if (!key || seen.has(key)) continue
+          seen.add(key); s.count = 1
+        }
+        sensors.push(s)
+      }
       return { ok: true, machineType: machine, params: params, sensors: sensors }
     }
     async function saveRobotSpec(args) {
