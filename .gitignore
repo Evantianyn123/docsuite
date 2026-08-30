@@ -10,3 +10,7 @@ __pycache__/
 node_modules/
 .DS_Store
 Thumbs.db
+
+# pip 临时目录（含权限受限残留）
+.pip-tmp/
+
