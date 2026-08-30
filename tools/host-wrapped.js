@@ -1009,6 +1009,8 @@ p); else out.push(p) } }; walk(outline, []); return out
         templateRef: tpl ? tpl.id : '', templateName: tpl ? tpl.name : '',
         techTemplateRef: techTpl ? techTpl.id : '', techTemplateName: techTpl ? techTpl.name : '',
         machineType: args && args.machineType ? String(args.machineType).slice(0, 20) : '',
+        robotSpec: { machineType: args && args.machineType ? String(args.machineType).slice(0, 20) : '',
+params: [], sensors: [] },
         outline: tpl ? cloneOutline(tpl.sections) : [],
         sections: {}, references: {}, bidMatrix: [], bidTerms: {}, bidSchedule: [], bidStructure: { compileRequirement: '',
 sections: [] },
@@ -1108,6 +1110,60 @@ sections: [] },
       await updateStatus(proj); await writeProj(proj)
       return { ok: true, project: proj }
     }
+    // 把已确定的机器人边界（基本参数 + 传感器搭载）转为 prompt 文本
+    function robotSpecText(proj) {
+      const rs = (proj && proj.robotSpec) || {}
+      const parts = []
+      if (rs.machineType) parts.push('机型：' + rs.machineType)
+      if (Array.isArray(rs.params) && rs.params.length) parts.push('基本参数：' + rs.params.map((p) => (p.name || '') + ' ' + (p.value || '') + (p.unit || '') + (p.desc ? '（' + p.desc + '）' : '')).filter(Boolean).join('；'))
+      if (Array.isArray(rs.sensors) && rs.sensors.length) parts.push('传感器搭载：' + rs.sensors.map((s) => (s.name || '') + (s.model ? ' ' + s.model : '') + '×' + (s.count || 1) + (s.purpose ? '（' + s.purpose + '）' : '')).filter(Boolean).join('；'))
+      return parts.join('\n')
+    }
+    // AI 生成机器人边界初稿：依据项目主题/机型 + 知识库设备清单
+    async function robotSpecDraft(args) {
+      const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
+      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
+      const items = await listItems()
+      const devices = items.filter((it) => (it.model || it.name) && (it.params || []).length).slice(0,
+40).map((it) => ({ id: it.id, name: it.name || '', model: it.model || '', manufacturer: it.manufacturer || '',
+category: it.category || '', params: (it.params || []).slice(0, 10).map((p) => p.name + ' ' + (p.value || '') + (p.unit || '')).join('、'),
+summary: (it.summary || '').slice(0, 120) }))
+      const machine = proj.machineType || (proj.robotSpec && proj.robotSpec.machineType) || 'ROV'
+      const system = '你是水下机器人（ROV/AUV）总体设计专家。你擅长为项目确定合理的机器人基本参数与传感器搭载方案。你的回答必须只包含一个 JSON 对象。'
+      const userPrompt = '请为以下水下机器人项目确定基本参数和传感器搭载方案（AI 初稿，供人工复核修改）。\n项目：' + proj.title + '\n主题：' + (proj.topic || '（无）') + '\n机型：' + machine + '\n\n1. 基本参数 params：给出 8-16 项关键参数（如最大作业深度、最大航速、排水量/空气中重量、外形尺寸、推进器配置、供电方式/电池容量、脐带缆长度、通信方式、最大载荷、工作温度等），格式 [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}]。\n2. 传感器搭载 sensors：结合下列知识库可用设备，为完成项目任务选择 5-15 项传感器/设备，格式 [{"name": "设备名", "model": "型号", "manufacturer": "厂家", "category": "分类", "count": 数量, "purpose": "搭载用途"}]，务必从知识库设备中选择（含 id 用 "itemId" 字段）。\n\n知识库可用设备：\n' + JSON.stringify(devices) + '\n\n输出 JSON：{"params": [...], "sensors": [{"itemId": "", "name": "", "model": "", "manufacturer": "", "category": "", "count": 1, "purpose": ""}]}'
+      const res = await llmText(route, system, userPrompt, 8000)
+      if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
+      const parsed = parseModelJson(res.text || res.reasoning || '')
+      if (!parsed) return { ok: false, message: '初稿生成失败，请重试' }
+      const params = (Array.isArray(parsed.params) ? parsed.params : []).filter((p) => p && p.name).slice(0,
+20).map((p) => ({ name: String(p.name || '').slice(0, 60), value: String(p.value || '').slice(0, 40),
+unit: String(p.unit || '').slice(0, 20), desc: String(p.desc || '').slice(0, 200) }))
+      const sensors = (Array.isArray(parsed.sensors) ? parsed.sensors : []).filter((s) => s && (s.name || s.itemId)).slice(0,
+20).map((s) => {
+        const dev = devices.find((d) => d.id === s.itemId) || null
+        return { itemId: String(s.itemId || ''), name: String(s.name || (dev && dev.name) || '').slice(0,
+80), model: String(s.model || (dev && dev.model) || '').slice(0, 60), manufacturer: String(s.manufacturer || (dev && dev.manufacturer) || '').slice(0,
+60), category: String(s.category || (dev && dev.category) || '其他').slice(0, 20), count: Math.max(1,
+parseInt(s.count, 10) || 1), purpose: String(s.purpose || '').slice(0, 200) }
+      })
+      return { ok: true, machineType: machine, params: params, sensors: sensors }
+    }
+    async function saveRobotSpec(args) {
+      const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
+      const rs = (args && args.robotSpec) || {}
+      proj.robotSpec = { machineType: String(rs.machineType || proj.machineType || 'ROV').slice(0,
+20), params: Array.isArray(rs.params) ? rs.params.filter((p) => p && (p.name || p.value)).map((p) => ({ name: String(p.name || '').slice(0,
+60), value: String(p.value || '').slice(0, 40), unit: String(p.unit || '').slice(0, 20), desc: String(p.desc || '').slice(0,
+200) })) : [], sensors: Array.isArray(rs.sensors) ? rs.sensors.filter((s) => s && (s.name || s.itemId)).map((s) => ({ itemId: String(s.itemId || ''),
+name: String(s.name || '').slice(0, 80), model: String(s.model || '').slice(0, 60), manufacturer: String(s.manufacturer || '').slice(0,
+60), category: String(s.category || '其他').slice(0, 20), count: Math.max(1, parseInt(s.count, 10) || 1),
+purpose: String(s.purpose || '').slice(0, 200) })) : [] }
+      if (proj.robotSpec.machineType) proj.machineType = proj.robotSpec.machineType
+      proj.updatedAt = new Date().toISOString()
+      await writeProj(proj)
+      return { ok: true, project: proj }
+    }
     async function genSection(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
       const nodeId = args && args.nodeId; const node = findNode(proj.outline || [], nodeId); if (!node) return { ok: false,
@@ -1122,10 +1178,11 @@ message: '章节不存在' }
         kbText = '\n\n可参考的知识库资料（从中引用相关参数并标注 [出处]）：\n' + kb.items.map((it) => '- [' + it.name + ']（型号 ' + (it.model || '未知') + '）：' + (it.summary || '') + '；关键参数：' + (it.params || []).slice(0,
 8).map((pp) => pp.name + ' ' + (pp.value || '') + (pp.unit || '')).join('、')).join('\n')
       }
+      const specText = robotSpecText(proj)
       const kindName = KIND_NAMES[proj.kind] || '技术文档'
       const langHint = proj.lang === 'en' ? 'Write in English.' : '用中文撰写。'
-      const system = '你是资深' + kindName + '撰写专家。你撰写的章节内容专业、详实、结构清晰。只输出章节正文 Markdown，不要输出章节标题。'
-      const userPrompt = '请撰写章节「' + node.title + '」。\n本节要点：' + (node.desc || '（无）') + '\n项目主题：' + proj.title + ' - ' + (proj.topic || '') + (proj.machineType ? '\n机型：' + proj.machineType : '') + kbText + '\n\n要求：' + langHint + ' 使用 Markdown 格式（可用小标题、列表、表格），内容 400-900 字，专业且具体；引用知识库资料时在正文后标注 [出处：资料名]。'
+      const system = '你是资深' + kindName + '撰写专家。你撰写的章节内容专业、详实、结构清晰，严格遵循已确定的机器人边界参数。只输出章节正文 Markdown，不要输出章节标题。'
+      const userPrompt = '请撰写章节「' + node.title + '」。\n本节要点：' + (node.desc || '（无）') + '\n项目主题：' + proj.title + ' - ' + (proj.topic || '') + (proj.machineType ? '\n机型：' + proj.machineType : '') + (specText ? '\n\n【已确定的机器人边界（撰写时须严格遵循，不得与之矛盾）】\n' + specText : '') + kbText + '\n\n要求：' + langHint + ' 使用 Markdown 格式（可用小标题、列表、表格），内容 400-900 字，专业且具体；引用知识库资料时在正文后标注 [出处：资料名]。'
       const res = await llmText(route, system, userPrompt, 3000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const content = (res.text || res.reasoning || '').trim()
@@ -1504,6 +1561,8 @@ method, String((e && e.message) || e)) }
     register('docsuite/proj/gen-outline', async (args) => genOutline(args || {}))
     register('docsuite/proj/gen-outline-doc', async (args) => genOutlineFromDoc(args || {}))
     register('docsuite/proj/save-outline', async (args) => saveOutline(args || {}))
+    register('docsuite/proj/robot-spec-draft', async (args) => robotSpecDraft(args || {}))
+    register('docsuite/proj/save-robot-spec', async (args) => saveRobotSpec(args || {}))
     register('docsuite/proj/gen-section', async (args) => genSection(args || {}))
     register('docsuite/proj/save-section', async (args) => saveSection(args || {}))
     register('docsuite/proj/export', async (args) => exportProject(args || {}))

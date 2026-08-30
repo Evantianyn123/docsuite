@@ -689,6 +689,99 @@ err) : null, el('div', { className: 'ds-muted', style: { marginBottom: 8 } }, '�
 el('button', { className: 'ds-btn-ghost', onClick: () => setOutline(outline.concat([{ id: newId(),
 title: '', desc: '', children: [] }])) }, '+ 添加章节'))))
     }
+
+    // ================= 机器人边界配置（基本参数 + 传感器搭载，AI 初稿人工复核） =================
+    function RobotSpecEditor(props) {
+      const project = props.project
+      const rs = (project.robotSpec && project.robotSpec.params && project.robotSpec.sensors) ? project.robotSpec : { machineType: project.machineType || 'ROV',
+params: [], sensors: [] }
+      const [machineType, setMachineType] = React.useState(rs.machineType || 'ROV')
+      const [params, setParams] = React.useState((rs.params || []).map((p) => ({ name: p.name || '',
+value: p.value || '', unit: p.unit || '', desc: p.desc || '' })))
+      const [sensors, setSensors] = React.useState((rs.sensors || []).map((s) => ({ itemId: s.itemId || '',
+name: s.name || '', model: s.model || '', manufacturer: s.manufacturer || '', category: s.category || '',
+count: s.count || 1, purpose: s.purpose || '' })))
+      const [busy, setBusy] = React.useState(false); const [saving, setSaving] = React.useState(false); const [err,
+setErr] = React.useState(null); const [msg, setMsg] = React.useState(null)
+      const [kbItems, setKbItems] = React.useState([])
+      const newParam = () => ({ name: '', value: '', unit: '', desc: '' })
+      const newSensor = () => ({ itemId: '', name: '', model: '', manufacturer: '', category: '',
+count: 1, purpose: '' })
+      const setParam = (i, key, val) => setParams(params.map((p, idx) => idx === i ? Object.assign({},
+p, { [key]: val }) : p))
+      const setSensor = (i, key, val) => setSensors(sensors.map((s, idx) => idx === i ? Object.assign({},
+s, { [key]: val }) : s))
+      React.useEffect(() => { rpc('docsuite/kb/list').then((r) => setKbItems((r && r.items) || [])).catch(() => {}) },
+[])
+      const genDraft = () => {
+        setBusy(true); setErr(null); setMsg(null)
+        rpc('docsuite/proj/robot-spec-draft', { id: project.id }).then((r) => {
+          if (r && r.ok) { setMachineType(r.machineType || machineType); setParams((r.params || []).map((p) => ({ name: p.name || '',
+value: p.value || '', unit: p.unit || '', desc: p.desc || '' }))); setSensors((r.sensors || []).map((s) => ({ itemId: s.itemId || '',
+name: s.name || '', model: s.model || '', manufacturer: s.manufacturer || '', category: s.category || '',
+count: s.count || 1, purpose: s.purpose || '' }))); setMsg('🤖 已生成初稿（基本参数 ' + (r.params || []).length + ' 项，传感器 ' + (r.sensors || []).length + ' 项），请人工复核修改') }
+          else setErr('初稿生成失败：' + ((r && r.message) || '未知'))
+        }).catch((e) => setErr('初稿生成异常：' + String((e && e.message) || e))).then(() => setBusy(false))
+      }
+      const addFromKb = (itemId) => {
+        const it = kbItems.find((x) => x.id === itemId); if (!it) return
+        if (sensors.some((s) => s.itemId === itemId)) { setMsg('该设备已在搭载清单中'); return }
+        setSensors(sensors.concat([{ itemId: it.id, name: it.name || '', model: it.model || '', manufacturer: it.manufacturer || '',
+category: it.category || '', count: 1, purpose: '' }]))
+      }
+      const confirm = () => {
+        setSaving(true); setErr(null)
+        rpc('docsuite/proj/save-robot-spec', { id: project.id, robotSpec: { machineType: machineType,
+params: params, sensors: sensors } })
+          .then((r) => { if (r && r.ok) { props.onConfirmed(r.project) } else setErr('保存失败：' + ((r && r.message) || '未知')) })
+          .catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setSaving(false))
+      }
+      return el('div', null,
+        el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-panel-title',
+style: { margin: 0 } }, '🤖 机器人边界配置'), el('span', { className: 'ds-muted' }, '「' + (project.title || '') + '」'),
+el('button', { className: 'ds-btn', onClick: genDraft, disabled: busy }, busy ? '生成中…' : '🪄 自动生成初稿'),
+el('button', { className: 'ds-btn', onClick: confirm, disabled: saving }, saving ? '保存中…' : '✅ 确认边界，开始写作'),
+el('button', { className: 'ds-btn-ghost', onClick: props.onCancel }, '← 返回大纲')), err ? el('div', { className: 'ds-err' },
+err) : null, msg ? el('div', { className: 'ds-ok' }, msg) : null, el('div', { className: 'ds-muted',
+style: { marginBottom: 8 } }, '确定机器人基本参数与传感器搭载方案后，后续所有章节将严格基于此边界生成。可先「自动生成初稿」再人工复核修改。')),
+        el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title', style: { fontSize: 14 } },
+'基本参数（' + params.length + ' 项）'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' },
+'机型'), el('select', { className: 'ds-select', value: machineType, onChange: (e) => setMachineType(e.target.value) },
+MACHINE_TYPES.map((m) => el('option', { key: m, value: m }, m)))), params.length ? el('table', { className: 'ds-table' },
+el('thead', null, el('tr', null, el('th', null, '参数名'), el('th', null, '数值'), el('th', { style: { width: 80 } },
+'单位'), el('th', null, '说明'), el('th', { style: { width: 50 } }, ''))), el('tbody', null, params.map((p,
+i) => el('tr', { key: i }, el('td', null, el('input', { className: 'ds-input', value: p.name, onChange: (e) => setParam(i,
+'name', e.target.value), placeholder: '如：最大作业深度' })), el('td', null, el('input', { className: 'ds-input',
+value: p.value, onChange: (e) => setParam(i, 'value', e.target.value) })), el('td', null, el('input',
+{ className: 'ds-input', value: p.unit, onChange: (e) => setParam(i, 'unit', e.target.value), placeholder: '如：m' })),
+el('td', null, el('input', { className: 'ds-input', value: p.desc, onChange: (e) => setParam(i, 'desc',
+e.target.value) })), el('td', null, el('button', { className: 'ds-btn-danger', onClick: () => setParams(params.filter((_,
+j) => j !== i)) }, '✕')))))) : el('div', { className: 'ds-muted' }, '暂无参数，点击「🪄 自动生成初稿」或手动添加。'), el('div',
+{ className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setParams(params.concat([newParam()])) },
+'+ 添加参数'))),
+        el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title', style: { fontSize: 14 } },
+'传感器搭载（' + sensors.length + ' 项）'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' },
+'从知识库添加'), el('select', { className: 'ds-select', value: '', onChange: (e) => { if (e.target.value) { addFromKb(e.target.value); e.target.value = '' } } },
+el('option', { value: '' }, '（选择设备…）'), kbItems.map((it) => el('option', { key: it.id, value: it.id },
+(it.model ? it.model + ' ' : '') + (it.name || it.id) + '（' + (it.category || '未分类') + '）'))), el('span',
+{ className: 'ds-muted' }, '或点击「自动生成初稿」按作业需求推荐搭载')), sensors.length ? el('table', { className: 'ds-table' },
+el('thead', null, el('tr', null, el('th', null, '设备名称'), el('th', null, '型号'), el('th', null, '厂家'),
+el('th', { style: { width: 90 } }, '分类'), el('th', { style: { width: 60 } }, '数量'), el('th', null,
+'搭载用途'), el('th', { style: { width: 50 } }, ''))), el('tbody', null, sensors.map((s, i) => el('tr',
+{ key: i }, el('td', null, el('input', { className: 'ds-input', value: s.name, onChange: (e) => setSensor(i,
+'name', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: s.model, onChange: (e) => setSensor(i,
+'model', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: s.manufacturer,
+onChange: (e) => setSensor(i, 'manufacturer', e.target.value) })), el('td', null, el('select', { className: 'ds-select',
+value: s.category, onChange: (e) => setSensor(i, 'category', e.target.value) }, CATEGORIES.map((c) => el('option',
+{ key: c, value: c }, c)))), el('td', null, el('input', { className: 'ds-input', type: 'number', min: 1,
+value: s.count, onChange: (e) => setSensor(i, 'count', parseInt(e.target.value, 10) || 1) })), el('td',
+null, el('input', { className: 'ds-input', value: s.purpose, onChange: (e) => setSensor(i, 'purpose',
+e.target.value), placeholder: '如：水深测量' })), el('td', null, el('button', { className: 'ds-btn-danger',
+onClick: () => setSensors(sensors.filter((_, j) => j !== i)) }, '✕')))))) : el('div', { className: 'ds-muted' },
+'暂无搭载设备，从知识库添加或自动生成初稿。'), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost',
+onClick: () => setSensors(sensors.concat([newSensor()])) }, '+ 手动添加'))),
+      )
+    }
     // ================= 文档工坊页面（M3） =================
     function StudioPage() {
       const [projects, setProjects] = React.useState([]); const [templates, setTemplates] = React.useState([]); const [busy,
@@ -701,6 +794,7 @@ setNTopic] = React.useState(''); const [nLang, setNLang] = React.useState('zh')
 setNMachine] = React.useState('ROV')
       const [nDocFile, setNDocFile] = React.useState(null); const [nOutlineFile, setNOutlineFile] = React.useState(null)
       const [outlineDraft, setOutlineDraft] = React.useState(null)
+      const [specDraft, setSpecDraft] = React.useState(null)
       const refresh = () => { rpc('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }
       React.useEffect(() => { refresh(); rpc('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch(() => {}) },
 [])
@@ -770,8 +864,11 @@ children: [] }
         rpc('docsuite/proj/delete', { id: p.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setActive(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
       }
       let body
-      if (outlineDraft) {
-        body = el(OutlineEditor, { project: outlineDraft, onConfirmed: (p) => { setOutlineDraft(null); setActive(p); refresh() },
+      if (specDraft) {
+        body = el(RobotSpecEditor, { project: specDraft, onConfirmed: (p) => { setSpecDraft(null); setActive(p); refresh() },
+onCancel: () => { setSpecDraft(null); setActive(outlineDraft); refresh() } })
+      } else if (outlineDraft) {
+        body = el(OutlineEditor, { project: outlineDraft, onConfirmed: (p) => { setOutlineDraft(null); if (p.kind === 'tech' || p.kind === 'bid' || p.kind === 'test') setSpecDraft(p); else { setActive(p); refresh() } },
 onCancel: () => { setOutlineDraft(null); refresh() } })
       } else if (active) {
         body = el(ProjectWorkbench, { project: active, onBack: () => { setActive(null); refresh() },
@@ -835,6 +932,7 @@ setExporting] = React.useState(null)
       const [contractDate, setContractDate] = React.useState(new Date().toISOString().slice(0, 10)); const [deliveryDays,
 setDeliveryDays] = React.useState(''); const [scheduleBusy, setScheduleBusy] = React.useState(false)
       const [editOutline, setEditOutline] = React.useState(false)
+      const [specEdit, setSpecEdit] = React.useState(false)
       const update = (next) => { setP(next); props.onChanged(next) }
       const leaves = leafList(p.outline || []); const matrix = p.bidMatrix || []; const terms = p.bidTerms || {}; const schedule = p.bidSchedule || []; const bidStruct = p.bidStructure || {}
       React.useEffect(() => { if (terms && terms.deliveryDays && !deliveryDays) setDeliveryDays(String(terms.deliveryDays)) },
@@ -918,7 +1016,9 @@ fontSize: 12 }, onClick: () => { setViewNode(n.id); setEditNode(null) } }, '👁
 '✏️ 编辑') : null, refsOf(n.id).length ? el('span', { className: 'ds-tag', style: { marginTop: 0 } },
 '📎 ' + refsOf(n.id).length) : null), renderOutline(n.children, depth + 1))))
       let body
-      if (editOutline) { body = el(OutlineEditor, { project: p, onConfirmed: (np) => { update(np); setEditOutline(false); setMsg('大纲已更新') },
+      if (specEdit) { body = el(RobotSpecEditor, { project: p, onConfirmed: (np) => { update(np); setSpecEdit(false); setMsg('边界配置已更新') },
+onCancel: () => setSpecEdit(false) }) }
+      else if (editOutline) { body = el(OutlineEditor, { project: p, onConfirmed: (np) => { update(np); setEditOutline(false); setMsg('大纲已更新') },
 onCancel: () => setEditOutline(false) }) }
       else if (viewNode) { body = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' },
 el('button', { className: 'ds-btn-ghost', onClick: () => setViewNode(null) }, '← 返回大纲'), el('span',
@@ -933,7 +1033,8 @@ busy ? '保存中…' : '💾 保存章节'), el('span', { className: 'ds-muted'
       else {
         const toolbar = el('div', { className: 'ds-kb-toolbar' }, el('button', { className: 'ds-btn',
 onClick: genOutline, disabled: busy }, '🪄 生成大纲'), el('button', { className: 'ds-btn-ghost', onClick: () => setEditOutline(true),
-disabled: busy }, '✏️ 编辑大纲'), el('button', { className: 'ds-btn-ghost', onClick: saveOutline, disabled: busy },
+disabled: busy }, '✏️ 编辑大纲'), el('button', { className: 'ds-btn-ghost', onClick: () => setSpecEdit(true),
+disabled: busy }, '🤖 边界配置'), el('button', { className: 'ds-btn-ghost', onClick: saveOutline, disabled: busy },
 '💾 保存大纲'), el('button', { className: 'ds-btn-ghost', onClick: genAll, disabled: busy || !leaves.length },
 '⚡ 一键生成全部章节'), el('button', { className: 'ds-btn-ghost', onClick: () => doExport('md'), disabled: exporting !== null },
 exporting === 'md' ? '导出中…' : '⬇️ Markdown'), el('button', { className: 'ds-btn-ghost', onClick: () => doExport('docx'),
