@@ -1,0 +1,12 @@
+# 个人数据 / 生成物
+.docsuite-data/
+__pycache__/
+*.pyc
+*.docx
+*.pptx
+*.pdf
+
+# Node / 系统
+node_modules/
+.DS_Store
+Thumbs.db
