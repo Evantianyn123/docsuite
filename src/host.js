@@ -891,6 +891,12 @@ return {
     }
     async function genOutline(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
+      // 用户已提供大纲（上传 MD/JSON 解析结果）→ 直接采用，跳过 LLM
+      if (args && args.outline !== undefined) {
+        proj.outline = cloneOutline(args.outline); proj.sections = {}; proj.references = {}
+        await updateStatus(proj); await writeProj(proj)
+        return { ok: true, project: proj, fromUser: true }
+      }
       if (!llm) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const kindName = KIND_NAMES[proj.kind] || '技术文档'
@@ -916,6 +922,45 @@ return {
       proj.outline = cloneOutline(parsed.outline); proj.sections = {}; proj.references = {}
       await updateStatus(proj); await writeProj(proj)
       return { ok: true, project: proj }
+    }
+    // 读取用户上传的需求/参考文档 → LLM 生成大纲
+    async function genOutlineFromDoc(args) {
+      const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
+      if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少上传文档' }
+      const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
+      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      const dir = await dataDir(); const id = 'doc_' + Date.now().toString(36)
+      const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
+      await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
+      const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py')
+      const safeName = String(args.fileName).replace(/"/g, '')
+      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir, 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
+      let text = ''
+      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' }
+      if (!text || text.length < 30) {
+        const pdfPath = joinPath(tmpDir, safeName)
+        if (/^.*\.pdf$/i.test(safeName)) {
+          const ocrR = await ocrPdfFile(pdfPath, joinPath(tmpDir, 'extracted.txt'))
+          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' } }
+        }
+      }
+      if (!text) return { ok: false, message: '文档解析失败：' + pickStdout(res).slice(0, 300) }
+      const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
+      const kindName = KIND_NAMES[proj.kind] || '技术文档'
+      const machine = proj.machineType ? '\n机型：' + proj.machineType : ''
+      let tplRef = ''
+      if (proj.templateRef) { const t = await findTemplate(proj.templateRef); if (t) tplRef = '\n可参考的整体模板章节结构（可选）：\n' + JSON.stringify(t.sections).slice(0, 2000) }
+      let system = '你是资深' + kindName + '撰写专家。你擅长从需求文档/参考资料中提炼文档大纲。你的回答必须只包含一个 JSON 对象。'
+      let userPrompt = '请阅读以下需求文档/参考资料，为「' + proj.title + '」设计章节大纲（总章节数 8-30 个，叶子章节要具体可写，覆盖文档中的关键内容）。\n文档标题：' + proj.title + '\n主题描述：' + (proj.topic || '（无）') + machine + tplRef + '\n\n文档内容（前 40000 字符）：\n' + text.slice(0, 40000) + '\n\n输出 JSON：{"outline": [{"title": "1 章节标题", "desc": "本节要点", "children": [{"title": "1.1 子章节", "desc": "要点", "children": []}]}]}'
+      const res2 = await llmText(route, system, userPrompt, 5000)
+      if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
+      const parsed = parseModelJson(res2.text || res2.reasoning || '')
+      if (!parsed || !Array.isArray(parsed.outline)) return { ok: false, message: '模型输出解析失败，请重试' }
+      proj.outline = cloneOutline(parsed.outline); proj.sections = {}; proj.references = {}
+      proj.topic = (proj.topic || '') + (proj.topic ? '\n' : '') + '（依据上传文档生成大纲：' + safeName + '）'
+      await updateStatus(proj); await writeProj(proj)
+      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + tmpDir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })) } catch (e) {}
+      return { ok: true, project: proj, sourceDoc: safeName }
     }
     async function saveOutline(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
@@ -1264,6 +1309,7 @@ return {
     register('docsuite/proj/get', async (args) => ({ project: await readProj(args && args.id) }))
     register('docsuite/proj/delete', async (args) => deleteProject(args || {}))
     register('docsuite/proj/gen-outline', async (args) => genOutline(args || {}))
+    register('docsuite/proj/gen-outline-doc', async (args) => genOutlineFromDoc(args || {}))
     register('docsuite/proj/save-outline', async (args) => saveOutline(args || {}))
     register('docsuite/proj/gen-section', async (args) => genSection(args || {}))
     register('docsuite/proj/save-section', async (args) => saveSection(args || {}))

@@ -1,0 +1,88 @@
+    // ================= 文档工坊页面（M3） =================
+    function StudioPage() {
+      const [projects, setProjects] = React.useState([]); const [templates, setTemplates] = React.useState([]); const [busy, setBusy] = React.useState(false)
+      const [err, setErr] = React.useState(null); const [msg, setMsg] = React.useState(null); const [createOpen, setCreateOpen] = React.useState(false); const [active, setActive] = React.useState(null)
+      const [nKind, setNKind] = React.useState('tech'); const [nTitle, setNTitle] = React.useState(''); const [nTopic, setNTopic] = React.useState(''); const [nLang, setNLang] = React.useState('zh')
+      const [nTpl, setNTpl] = React.useState(''); const [nTechTpl, setNTechTpl] = React.useState(''); const [nMachine, setNMachine] = React.useState('ROV')
+      const [nDocFile, setNDocFile] = React.useState(null); const [nOutlineFile, setNOutlineFile] = React.useState(null)
+      const [outlineDraft, setOutlineDraft] = React.useState(null)
+      const refresh = () => { rpc('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }
+      React.useEffect(() => { refresh(); rpc('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch(() => {}) }, [])
+      const parseOutlineText = (text, name) => {
+        if (/\.json$/i.test(name)) {
+          const parsed = JSON.parse(text)
+          const arr = Array.isArray(parsed) ? parsed : (parsed && parsed.outline)
+          return Array.isArray(arr) ? arr : null
+        }
+        const lines = String(text).split('\n'); const roots = []; const stack = []; let seq = 0
+        for (const raw of lines) {
+          const m = raw.match(/^(#{1,4})\s+(.*)$/)
+          if (!m) continue
+          const level = m[1].length; const title = m[2].trim()
+          const node = { id: 'o-' + Date.now().toString(36) + '-' + (seq++), title: title, desc: '', children: [] }
+          while (stack.length >= level) stack.pop()
+          if (stack.length) stack[stack.length - 1].children.push(node)
+          else roots.push(node)
+          stack.push(node)
+        }
+        return roots.length ? roots : null
+      }
+      const createProj = () => {
+        if (!nTitle.trim()) { setErr('请填写项目标题'); return }
+        if (!nTpl) { setErr('请先选择套用模板'); return }
+        if (!nTopic.trim() && !nDocFile && !nOutlineFile) { setErr('请填写主题描述，或上传需求/参考文档、大纲文件'); return }
+        setBusy(true); setErr(null); setMsg(null)
+        const args = { kind: nKind, title: nTitle.trim(), topic: nTopic.trim(), lang: nLang, templateRef: nTpl }
+        if (nKind === 'bid' && nTechTpl) args.techTemplateRef = nTechTpl
+        if (nKind === 'test' && nMachine) args.machineType = nMachine
+        const runOutline = (proj) => {
+          const after = (r) => {
+            if (!r || !r.ok) { setErr('大纲生成失败：' + ((r && r.message) || '未知')); setBusy(false); return }
+            setOutlineDraft(r.project); setBusy(false)
+          }
+          if (nOutlineFile) {
+            const reader = new FileReader()
+            reader.onload = () => {
+              let parsed = null
+              try { parsed = parseOutlineText(String(reader.result), nOutlineFile.name) } catch (e) { parsed = null }
+              if (!parsed || !parsed.length) { setErr('大纲文件解析失败，请使用 Markdown（# 标题）或 JSON 格式'); setBusy(false); return }
+              rpc('docsuite/proj/gen-outline', { id: proj.id, outline: parsed }).then(after).catch((e) => { setErr('大纲应用异常：' + String((e && e.message) || e)); setBusy(false) })
+            }
+            reader.onerror = () => { setErr('读取大纲文件失败'); setBusy(false) }
+            reader.readAsText(nOutlineFile)
+            return
+          }
+          if (nDocFile) {
+            const reader = new FileReader()
+            reader.onload = () => {
+              const b64 = String(reader.result).split(',')[1] || ''
+              rpc('docsuite/proj/gen-outline-doc', { id: proj.id, fileName: nDocFile.name, base64: b64 }).then(after).catch((e) => { setErr('文档解析异常：' + String((e && e.message) || e)); setBusy(false) })
+            }
+            reader.onerror = () => { setErr('读取文档失败'); setBusy(false) }
+            reader.readAsDataURL(nDocFile)
+            return
+          }
+          rpc('docsuite/proj/gen-outline', { id: proj.id }).then(after).catch((e) => { setErr('大纲生成异常：' + String((e && e.message) || e)); setBusy(false) })
+        }
+        rpc('docsuite/proj/create', args)
+          .then((r) => { if (r && r.ok) { setMsg('项目已创建，正在生成大纲…'); setCreateOpen(false); refresh(); runOutline(r.project) } else { setErr('创建失败：' + ((r && r.message) || '未知')); setBusy(false) } })
+          .catch((e) => { setErr('创建异常：' + String((e && e.message) || e)); setBusy(false) })
+      }
+      const removeProj = (p) => {
+        if (!window.confirm('确认删除项目「' + p.title + '」？')) return
+        rpc('docsuite/proj/delete', { id: p.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setActive(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
+      }
+      let body
+      if (outlineDraft) {
+        body = el(OutlineEditor, { project: outlineDraft, onConfirmed: (p) => { setOutlineDraft(null); setActive(p); refresh() }, onCancel: () => { setOutlineDraft(null); refresh() } })
+      } else if (active) {
+        body = el(ProjectWorkbench, { project: active, onBack: () => { setActive(null); refresh() }, onChanged: (p) => setActive(p) })
+      } else {
+        const filteredTpl = templates.filter((t) => t.docKind === nKind); const techTpls = templates.filter((t) => t.docKind === 'tech')
+        const toolbar = el('div', { className: 'ds-kb-toolbar' }, el('button', { className: 'ds-btn', onClick: () => setCreateOpen(!createOpen) }, createOpen ? '收起表单' : '📝 新建文档项目'), el('span', { className: 'ds-muted' }, '共 ' + projects.length + ' 个项目'))
+        const createPanel = createOpen ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title' }, '📝 新建文档项目'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '文档类型'), el('select', { className: 'ds-select', value: nKind, onChange: (e) => setNKind(e.target.value) }, DOC_KINDS.map((d) => el('option', { key: d.key, value: d.key }, d.icon + ' ' + d.label)))), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '项目标题 *'), el('input', { className: 'ds-input', value: nTitle, onChange: (e) => setNTitle(e.target.value), placeholder: '如：6000m 级 ROV 总体技术方案' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '主题描述'), el('textarea', { className: 'ds-textarea', value: nTopic, onChange: (e) => setNTopic(e.target.value), placeholder: '提出你的需求：项目背景、目标、关键技术点、约束条件等，越具体生成质量越高' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '需求文档'), el('input', { type: 'file', accept: '.pdf,.docx,.txt,.md', className: 'ds-file-btn', onChange: (e) => { const f = e.target.files && e.target.files[0]; setNDocFile(f || null); e.target.value = '' } }), el('span', { className: 'ds-muted' }, nDocFile ? '已选：' + nDocFile.name : '可选：上传需求/参考文档，LLM 将读取后生成大纲')), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '大纲文件'), el('input', { type: 'file', accept: '.md,.json,.txt', className: 'ds-file-btn', onChange: (e) => { const f = e.target.files && e.target.files[0]; setNOutlineFile(f || null); e.target.value = '' } }), el('span', { className: 'ds-muted' }, nOutlineFile ? '已选：' + nOutlineFile.name : '可选：直接用你已有的 Markdown/JSON 大纲')), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '语言'), el('select', { className: 'ds-select', value: nLang, onChange: (e) => setNLang(e.target.value) }, el('option', { value: 'zh' }, '中文'), el('option', { value: 'en' }, 'English')), nKind === 'test' ? el('span', { className: 'ds-label' }, '机型') : null, nKind === 'test' ? el('select', { className: 'ds-select', value: nMachine, onChange: (e) => setNMachine(e.target.value) }, MACHINE_TYPES.map((m) => el('option', { key: m, value: m }, m))) : null), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '套用模板'), el('select', { className: 'ds-select', value: nTpl, onChange: (e) => setNTpl(e.target.value) }, el('option', { value: '' }, '（请选择模板…）'), filteredTpl.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name)))), nKind === 'bid' ? el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '技术方案参考模板'), el('select', { className: 'ds-select', value: nTechTpl, onChange: (e) => setNTechTpl(e.target.value) }, el('option', { value: '' }, '（不指定，AI 按招标要求生成）'), techTpls.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name))), el('span', { className: 'ds-muted' }, '标书「技术方案」部分按此模板生成')) : null, el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn', onClick: createProj, disabled: busy }, busy ? '创建中…' : '🚀 创建并生成大纲'), el('span', { className: 'ds-muted' }, '生成大纲后可编辑，确认后再进入写作'))) : null
+        const list = el('div', { className: 'ds-list' }, projects.map((p) => el('div', { key: p.id, className: 'ds-item' }, el('div', { className: 'ds-item-row' }, el('div', { className: 'ds-item-main', onClick: () => setActive(p) }, el('div', { className: 'ds-item-row' }, el('span', { className: 'ds-card-icon', style: { fontSize: 18 } }, kindIcon(p.kind)), el('div', { className: 'ds-item-title' }, p.title || p.id), el('span', { className: 'ds-badge' }, kindLabel(p.kind)), p.status ? el('span', { className: 'ds-badge-violet' }, statusText(p.status)) : null), el('div', { className: 'ds-item-meta' }, (p.topic || '').slice(0, 80) + ' · ' + leafList(p.outline).length + ' 个章节' + (p.machineType ? ' · ' + p.machineType : ''))), el('button', { className: 'ds-btn-danger', onClick: () => removeProj(p) }, '🗑')))), !projects.length ? el('div', { className: 'ds-muted', style: { padding: 20, textAlign: 'center' } }, '暂无项目。点击「📝 新建文档项目」开始。') : null)
+        body = el('div', null, el('div', { className: 'ds-panel' }, toolbar, err ? el('div', { className: 'ds-err' }, err) : null, msg ? el('div', { className: 'ds-ok' }, msg) : null), createPanel, list)
+      }
+      return el('div', null, el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-panel-title', style: { margin: 0 } }, '📝 文档工坊'), el('span', { className: 'ds-sub' }, '技术方案 / 调研报告 / 投标技术文件 / 机器人测试方案'))), body)
+    }

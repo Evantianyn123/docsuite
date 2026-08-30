@@ -1,0 +1,23 @@
+    // ================= 大纲编辑器（创建流程：生成后可编辑，确认后进入写作） =================
+    function OutlineEditor(props) {
+      const project = props.project
+      const [outline, setOutline] = React.useState(project.outline || [])
+      const [saving, setSaving] = React.useState(false)
+      const [err, setErr] = React.useState(null)
+      let seq = 0
+      const newId = () => 'n-' + Date.now().toString(36) + '-' + (seq++)
+      const updateNode = (nodes, id, patch) => nodes.map((n) => n.id === id ? Object.assign({}, n, patch) : Object.assign({}, n, { children: updateNode(n.children || [], id, patch) }))
+      const removeNode = (nodes, id) => nodes.filter((n) => n.id !== id).map((n) => Object.assign({}, n, { children: removeNode(n.children || [], id) }))
+      const addChild = (nodes, parentId) => nodes.map((n) => n.id === parentId ? Object.assign({}, n, { children: (n.children || []).concat([{ id: newId(), title: '', desc: '', children: [] }]) }) : Object.assign({}, n, { children: addChild(n.children || [], parentId) }))
+      const renderNode = (node, depth) => el('div', { key: node.id, className: 'ds-tree-node' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-muted', style: { minWidth: 26 } }, String(depth + 1) + '.'), el('input', { className: 'ds-input', value: node.title || '', onChange: (e) => setOutline(updateNode(outline, node.id, { title: e.target.value })), placeholder: '章节标题' }), el('button', { className: 'ds-btn-ghost', style: { padding: '2px 8px', fontSize: 12 }, onClick: () => setOutline(addChild(outline, node.id)) }, '+ 子节'), el('button', { className: 'ds-btn-danger', style: { padding: '2px 8px', fontSize: 12 }, onClick: () => setOutline(removeNode(outline, node.id)) }, '✕')), el('div', { className: 'ds-row' }, el('input', { className: 'ds-input', value: node.desc || '', onChange: (e) => setOutline(updateNode(outline, node.id, { desc: e.target.value })), placeholder: '本节要点' })), (node.children && node.children.length) ? el('div', { className: 'ds-tree-children' }, node.children.map((c) => renderNode(c, depth + 1))) : null)
+      const confirm = () => {
+        setSaving(true); setErr(null)
+        rpc('docsuite/proj/save-outline', { id: project.id, outline: outline })
+          .then((r) => { if (r && r.ok) { props.onConfirmed(r.project) } else setErr('保存失败：' + ((r && r.message) || '未知')) })
+          .catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setSaving(false))
+      }
+      const count = (nodes) => { let n = 0; const walk = (list) => { for (const s of list || []) { n++; walk(s.children) } }; walk(nodes); return n }
+      return el('div', null,
+        el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-panel-title', style: { margin: 0 } }, '📐 大纲编辑'), el('span', { className: 'ds-muted' }, '「' + (project.title || '') + '」 · ' + count(outline) + ' 个章节'), el('button', { className: 'ds-btn', onClick: confirm, disabled: saving }, saving ? '保存中…' : '✅ 确认大纲，开始写作'), el('button', { className: 'ds-btn-ghost', onClick: props.onCancel }, '← 返回')), err ? el('div', { className: 'ds-err' }, err) : null, el('div', { className: 'ds-muted', style: { marginBottom: 8 } }, '可增删章节、修改标题与要点；确认后进入逐章写作。')),
+        el('div', { className: 'ds-panel' }, outline.map((n) => renderNode(n, 0)), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setOutline(outline.concat([{ id: newId(), title: '', desc: '', children: [] }])) }, '+ 添加章节'))))
+    }

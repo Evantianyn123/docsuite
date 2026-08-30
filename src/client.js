@@ -9,6 +9,20 @@ return {
 
     const el = React.createElement
 
+    // RPC 包装：DSH 桥只接受纯 JSON。递归剔除 undefined（含嵌套对象/数组），
+    // 避免 host.call 因参数含 undefined 被桥拒绝（dynamicCordisRunner/invoke rejected "args"）。
+    function stripUndefined(v) {
+      if (v === undefined) return null
+      if (v === null) return null
+      if (Array.isArray(v)) { const out = []; for (let i = 0; i < v.length; i++) out.push(stripUndefined(v[i])); return out }
+      if (typeof v === 'object') { const out = {}; for (const k of Object.keys(v)) { if (v[k] === undefined) continue; out[k] = stripUndefined(v[k]) } return out }
+      return v
+    }
+    function rpc(method, args) {
+      const clean = args === undefined ? undefined : stripUndefined(args)
+      return host.call(method, clean)
+    }
+
     const disposeCss = styles.insert(`
 .ds-root{color-scheme:light dark;font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:20px 24px 40px;max-width:1080px;margin:0 auto}
 .ds-header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
@@ -151,7 +165,7 @@ return {
     function StatBox(props) { return el('div', { className: 'ds-stat' }, el('div', { className: 'ds-stat-value' }, String(props.value == null ? '—' : props.value)), el('div', { className: 'ds-stat-label' }, props.label)) }
     function EnvCheck() {
       const [info, setInfo] = React.useState(null); const [err, setErr] = React.useState(null); const [busy, setBusy] = React.useState(false)
-      const run = () => { setBusy(true); setErr(null); host.call('docsuite/env/check').then((r) => setInfo(r)).catch((e) => setErr(String((e && e.message) || e))).then(() => setBusy(false)) }
+      const run = () => { setBusy(true); setErr(null); rpc('docsuite/env/check').then((r) => setInfo(r)).catch((e) => setErr(String((e && e.message) || e))).then(() => setBusy(false)) }
       React.useEffect(() => { run() }, [])
       const items = []
       if (info) {
@@ -163,15 +177,15 @@ return {
     function SettingsContent() {
       const [dataDir, setDataDir] = React.useState(''); const [lang, setLang] = React.useState('zh'); const [msg, setMsg] = React.useState(null); const [err, setErr] = React.useState(null); const [saving, setSaving] = React.useState(false)
       const [migrateDir, setMigrateDir] = React.useState(''); const [migrating, setMigrating] = React.useState(false)
-      React.useEffect(() => { host.call('docsuite/config/get').then((c) => { setDataDir((c && c.dataDir) || ''); setLang((c && c.language) || 'zh') }).catch((e) => setErr(String((e && e.message) || e))) }, [])
-      const save = () => { setSaving(true); setMsg(null); setErr(null); host.call('docsuite/config/set', { patch: { dataDir: dataDir.trim(), language: lang } }).then(() => setMsg('配置已保存')).catch((e) => setErr('保存失败：' + String((e && e.message) || e))).then(() => setSaving(false)) }
+      React.useEffect(() => { rpc('docsuite/config/get').then((c) => { setDataDir((c && c.dataDir) || ''); setLang((c && c.language) || 'zh') }).catch((e) => setErr(String((e && e.message) || e))) }, [])
+      const save = () => { setSaving(true); setMsg(null); setErr(null); rpc('docsuite/config/set', { patch: { dataDir: dataDir.trim(), language: lang } }).then(() => setMsg('配置已保存')).catch((e) => setErr('保存失败：' + String((e && e.message) || e))).then(() => setSaving(false)) }
       const runMigrate = () => {
         if (!migrateDir.trim()) { setErr('请输入目标目录'); return }
         if (!window.confirm('将把全部数据（知识库/模板/项目/导出）从 ' + dataDir + ' 迁移到 ' + migrateDir.trim() + '，确认？')) return
         setMigrating(true); setErr(null); setMsg(null)
-        host.call('docsuite/migrate', { targetDir: migrateDir.trim() })
+        rpc('docsuite/migrate', { targetDir: migrateDir.trim() })
           .then((r) => {
-            if (r && r.ok) { setMsg('✅ 迁移完成，新数据目录：' + r.dataDir); setDataDir(r.dataDir); host.call('docsuite/config/get').then((c) => setDataDir((c && c.dataDir) || r.dataDir)).catch(() => {}) }
+            if (r && r.ok) { setMsg('✅ 迁移完成，新数据目录：' + r.dataDir); setDataDir(r.dataDir); rpc('docsuite/config/get').then((c) => setDataDir((c && c.dataDir) || r.dataDir)).catch(() => {}) }
             else { setErr('迁移失败：' + ((r && r.message) || '未知')) }
           })
           .catch((e) => setErr('迁移异常：' + String((e && e.message) || e))).then(() => setMigrating(false))
@@ -207,12 +221,12 @@ return {
       const [webOpen, setWebOpen] = React.useState(false); const [webQuery, setWebQuery] = React.useState(''); const [webResults, setWebResults] = React.useState([]); const [webBusy, setWebBusy] = React.useState(false); const [webImporting, setWebImporting] = React.useState(null); const [ocrId, setOcrId] = React.useState(null)
       const refresh = () => {
         const query = q.trim()
-        if (query) { host.call('docsuite/kb/search', { q: query, category: cat || undefined, page: 1, pageSize: 100 }).then((r) => { setItems((r && r.items) || []); setTotal((r && r.total) || 0) }).catch((e) => setErr('检索失败：' + String((e && e.message) || e))) }
-        else { host.call('docsuite/kb/list').then((r) => { const list = (r && r.items) || []; setItems(list); setTotal(list.length) }).catch((e) => setErr('加载失败：' + String((e && e.message) || e))) }
+        if (query) { const sargs = { q: query, page: 1, pageSize: 100 }; if (cat) sargs.category = cat; rpc('docsuite/kb/search', sargs).then((r) => { setItems((r && r.items) || []); setTotal((r && r.total) || 0) }).catch((e) => setErr('检索失败：' + String((e && e.message) || e))) }
+        else { rpc('docsuite/kb/list').then((r) => { const list = (r && r.items) || []; setItems(list); setTotal(list.length) }).catch((e) => setErr('加载失败：' + String((e && e.message) || e))) }
       }
       const enrichItem = (id) => {
         setEnrichingId(id); setErr(null); setMsg(null)
-        host.call('docsuite/kb/enrich', { id: id }).then((r) => {
+        rpc('docsuite/kb/enrich', { id: id }).then((r) => {
           if (r && r.ok) {
             if (r.split && r.items && r.items.length) setMsg('🤖 已拆分为 ' + r.modelCount + ' 个型号条目（首个 ' + (r.paramsCount != null ? r.paramsCount + ' 项参数' : '') + '）')
             else setMsg('🤖 AI 抽取完成：' + ((r.paramsCount != null ? r.paramsCount + ' 项参数' : '') + (r.summary ? '，已生成摘要' : '')))
@@ -222,12 +236,12 @@ return {
       }
       const reOcr = (id) => {
         setOcrId(id); setErr(null); setMsg(null)
-        host.call('docsuite/kb/reocr', { id: id }).then((r) => {
+        rpc('docsuite/kb/reocr', { id: id }).then((r) => {
           if (r && r.ok) { setMsg('🔍 OCR 完成：' + r.item.textLen + ' 字符'); setSelected(r.item); refresh() }
           else { setErr('OCR 失败：' + ((r && r.message) || '未知')) }
         }).catch((e) => setErr('OCR 异常：' + String((e && e.message) || e))).then(() => setOcrId(null))
       }
-      React.useEffect(() => { host.call('docsuite/env/setup-python').then((r) => setPy(r)).catch((e) => setPy({ ok: false, message: String((e && e.message) || e) })); refresh() }, [])
+      React.useEffect(() => { rpc('docsuite/env/setup-python').then((r) => setPy(r)).catch((e) => setPy({ ok: false, message: String((e && e.message) || e) })); refresh() }, [])
       const onFile = (e) => {
         const file = e.target.files && e.target.files[0]
         if (!file) return
@@ -235,7 +249,7 @@ return {
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = String(reader.result).split(',')[1] || ''
-          host.call('docsuite/kb/upload', { fileName: file.name, base64: b64, category: cat || '其他' }).then((r) => {
+          rpc('docsuite/kb/upload', { fileName: file.name, base64: b64, category: cat || '其他' }).then((r) => {
             if (r && r.ok) {
               setMsg('已入库：' + file.name + '（' + r.item.textLen + ' 字符）' + (r.item.ocr ? '，已自动 OCR 识别' : '') + '，正在 AI 抽取参数…')
               refresh(); enrichItem(r.item.id)
@@ -248,24 +262,24 @@ return {
       const runWebSearch = () => {
         if (!webQuery.trim()) { setErr('请输入搜索关键词'); return }
         setWebBusy(true); setErr(null); setMsg(null)
-        host.call('docsuite/web/search', { query: webQuery.trim() }).then((r) => {
+        rpc('docsuite/web/search', { query: webQuery.trim() }).then((r) => {
           if (r && r.ok) { setWebResults(r.sources || []) }
           else { setErr('搜索失败：' + ((r && r.message) || '未知')) }
         }).catch((e) => setErr('搜索异常：' + String((e && e.message) || e))).then(() => setWebBusy(false))
       }
       const runWebImport = (s) => {
         setWebImporting(s.url); setErr(null); setMsg(null)
-        host.call('docsuite/web/import', { url: s.url, title: s.title || s.url }).then((r) => {
+        rpc('docsuite/web/import', { url: s.url, title: s.title || s.url }).then((r) => {
           if (r && r.ok) { setMsg('🌐 已入库：' + r.item.name + '（' + r.item.textLen + ' 字符），正在 AI 抽取…'); refresh(); enrichItem(r.item.id) }
           else { setErr('导入失败：' + ((r && r.message) || '未知')) }
         }).catch((e) => setErr('导入异常：' + String((e && e.message) || e))).then(() => setWebImporting(null))
       }
       const toggleCompare = (id) => setCompareIds((prev) => prev.indexOf(id) >= 0 ? prev.filter((x) => x !== id) : prev.slice(0, 9).concat([id]))
-      const runCompare = () => { setBusy(true); host.call('docsuite/kb/compare', { ids: compareIds }).then((r) => setCompareData(r)).catch((e) => setErr('对比失败：' + String((e && e.message) || e))).then(() => setBusy(false)) }
-      const openDetail = (item) => { setSelected(item); setPreview(''); host.call('docsuite/kb/preview', { id: item.id }).then((r) => setPreview((r && r.text) || '')).catch(() => setPreview('')) }
+      const runCompare = () => { setBusy(true); rpc('docsuite/kb/compare', { ids: compareIds }).then((r) => setCompareData(r)).catch((e) => setErr('对比失败：' + String((e && e.message) || e))).then(() => setBusy(false)) }
+      const openDetail = (item) => { setSelected(item); setPreview(''); rpc('docsuite/kb/preview', { id: item.id }).then((r) => setPreview((r && r.text) || '')).catch(() => setPreview('')) }
       const downloadSource = () => {
         if (!selected) return
-        host.call('docsuite/kb/source', { id: selected.id }).then((r) => {
+        rpc('docsuite/kb/source', { id: selected.id }).then((r) => {
           if (!r || !r.ok) { setErr('下载失败：' + ((r && r.message) || '未知')); return }
           const bin = atob(r.base64); const bytes = new Uint8Array(bin.length)
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
@@ -277,7 +291,7 @@ return {
       const removeItem = () => {
         if (!selected) return
         if (!window.confirm('确认删除条目「' + (selected.name || selected.id) + '」？')) return
-        host.call('docsuite/kb/delete', { id: selected.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setSelected(null); setCompareData(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除失败：' + String((e && e.message) || e)))
+        rpc('docsuite/kb/delete', { id: selected.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setSelected(null); setCompareData(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除失败：' + String((e && e.message) || e)))
       }
       const [editing, setEditing] = React.useState(false)
       const [edName, setEdName] = React.useState(''); const [edManu, setEdManu] = React.useState(''); const [edModel, setEdModel] = React.useState(''); const [edCat, setEdCat] = React.useState('')
@@ -290,7 +304,7 @@ return {
       }
       const saveEdit = () => {
         setBusy(true)
-        host.call('docsuite/kb/update', { id: selected.id, patch: { name: edName, manufacturer: edManu, model: edModel, category: edCat, tags: edTags.split(/[,，]/).map((s) => s.trim()).filter(Boolean), summary: edSummary, params: edParams } })
+        rpc('docsuite/kb/update', { id: selected.id, patch: { name: edName, manufacturer: edManu, model: edModel, category: edCat, tags: edTags.split(/[,，]/).map((s) => s.trim()).filter(Boolean), summary: edSummary, params: edParams } })
           .then((r) => { if (r && r.ok) { setMsg('已保存'); setSelected(r.item); setEditing(false); refresh() } else setErr('保存失败：' + ((r && r.message) || '未知')) })
           .catch((e) => setErr('保存失败：' + String((e && e.message) || e))).then(() => setBusy(false))
       }
@@ -299,7 +313,7 @@ return {
       const createManual = () => {
         if (!mName.trim()) { setErr('请填写名称'); return }
         setBusy(true)
-        host.call('docsuite/kb/create-manual', { name: mName.trim(), manufacturer: mManu.trim(), model: mModel.trim(), category: mCat, tags: mTags.split(/[,，]/).map((s) => s.trim()).filter(Boolean), summary: mSummary, params: mParams.filter((p) => p.name.trim()) })
+        rpc('docsuite/kb/create-manual', { name: mName.trim(), manufacturer: mManu.trim(), model: mModel.trim(), category: mCat, tags: mTags.split(/[,，]/).map((s) => s.trim()).filter(Boolean), summary: mSummary, params: mParams.filter((p) => p.name.trim()) })
           .then((r) => { if (r && r.ok) { setMsg('已录入：' + r.item.name); setManualOpen(false); setMName(''); setMManu(''); setMModel(''); setMTags(''); setMSummary(''); setMParams([{ name: '', value: '', unit: '', desc: '' }]); refresh() } else setErr('录入失败：' + ((r && r.message) || '未知')) })
           .catch((e) => setErr('录入失败：' + String((e && e.message) || e))).then(() => setBusy(false))
       }
@@ -332,7 +346,7 @@ return {
       } else {
         const webPanel = webOpen ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title' }, '🌐 网页抓取入库'), el('div', { className: 'ds-row' }, el('input', { className: 'ds-input', value: webQuery, onChange: (e) => setWebQuery(e.target.value), placeholder: '搜索关键词，如：ROV 深度计 6000m 参数', onKeyDown: (e) => { if (e.key === 'Enter') runWebSearch() } }), el('button', { className: 'ds-btn', onClick: runWebSearch, disabled: webBusy }, webBusy ? '搜索中…' : '🔎 搜索'), el('span', { className: 'ds-muted' }, '搜索结果可点击「导入」抓取页面文本入库并自动 AI 抽取')), webResults.length ? el('div', { className: 'ds-list', style: { marginTop: 10 } }, webResults.map((s, si) => el('div', { key: si, className: 'ds-item' }, el('div', { className: 'ds-item-row' }, el('div', { className: 'ds-item-main' }, el('div', { className: 'ds-item-title' }, s.title || s.url), el('div', { className: 'ds-item-meta' }, s.url), s.snippet ? el('div', { className: 'ds-item-summary' }, s.snippet) : null), el('button', { className: 'ds-btn', onClick: () => runWebImport(s), disabled: webImporting === s.url }, webImporting === s.url ? '导入中…' : '📥 导入'))))) : el('div', { className: 'ds-muted', style: { padding: 10 } }, '输入关键词搜索后选择来源网页导入。')) : null
         body = el('div', null,
-          el('div', { className: 'ds-panel' }, el('div', { className: 'ds-kb-toolbar' }, toolStatus, el('input', { type: 'file', accept: '.pdf,.docx,.txt,.md', className: 'ds-file-btn', onChange: onFile, disabled: busy }), el('button', { className: 'ds-btn-ghost', onClick: () => { setWebOpen(!webOpen); setManualOpen(false) } }, webOpen ? '收起网页抓取' : '🌐 网页抓取'), el('button', { className: 'ds-btn-ghost', onClick: () => { setManualOpen(!manualOpen); setWebOpen(false) } }, manualOpen ? '收起录入' : '+ 手动录入'), el('button', { className: 'ds-btn-ghost', onClick: () => { setPy(null); host.call('docsuite/env/setup-python').then(setPy).catch((e) => setPy({ ok: false, message: String((e && e.message) || e) })) } }, '初始化工具链')), el('div', { className: 'ds-kb-toolbar' }, el('input', { className: 'ds-input', value: q, onChange: (e) => setQ(e.target.value), placeholder: '搜索关键词：型号、量程、精度、DVL、声纳…', onKeyDown: (e) => { if (e.key === 'Enter') refresh() } }), el('select', { className: 'ds-select', value: cat, onChange: (e) => setCat(e.target.value) }, el('option', { value: '' }, '全部分类'), CATEGORIES.map((c) => el('option', { key: c, value: c }, c))), el('button', { className: 'ds-btn', onClick: refresh }, '搜索'), el('span', { className: 'ds-muted' }, '共 ' + total + ' 条' + (compareIds.length ? ' · 已选 ' + compareIds.length : '')), el('button', { className: 'ds-btn', onClick: runCompare, disabled: compareIds.length < 2 || busy }, '⚖ 对比所选')), err ? el('div', { className: 'ds-err' }, err) : null, msg ? el('div', { className: 'ds-ok' }, msg) : null),
+          el('div', { className: 'ds-panel' }, el('div', { className: 'ds-kb-toolbar' }, toolStatus, el('input', { type: 'file', accept: '.pdf,.docx,.txt,.md', className: 'ds-file-btn', onChange: onFile, disabled: busy }), el('button', { className: 'ds-btn-ghost', onClick: () => { setWebOpen(!webOpen); setManualOpen(false) } }, webOpen ? '收起网页抓取' : '🌐 网页抓取'), el('button', { className: 'ds-btn-ghost', onClick: () => { setManualOpen(!manualOpen); setWebOpen(false) } }, manualOpen ? '收起录入' : '+ 手动录入'), el('button', { className: 'ds-btn-ghost', onClick: () => { setPy(null); rpc('docsuite/env/setup-python').then(setPy).catch((e) => setPy({ ok: false, message: String((e && e.message) || e) })) } }, '初始化工具链')), el('div', { className: 'ds-kb-toolbar' }, el('input', { className: 'ds-input', value: q, onChange: (e) => setQ(e.target.value), placeholder: '搜索关键词：型号、量程、精度、DVL、声纳…', onKeyDown: (e) => { if (e.key === 'Enter') refresh() } }), el('select', { className: 'ds-select', value: cat, onChange: (e) => setCat(e.target.value) }, el('option', { value: '' }, '全部分类'), CATEGORIES.map((c) => el('option', { key: c, value: c }, c))), el('button', { className: 'ds-btn', onClick: refresh }, '搜索'), el('span', { className: 'ds-muted' }, '共 ' + total + ' 条' + (compareIds.length ? ' · 已选 ' + compareIds.length : '')), el('button', { className: 'ds-btn', onClick: runCompare, disabled: compareIds.length < 2 || busy }, '⚖ 对比所选')), err ? el('div', { className: 'ds-err' }, err) : null, msg ? el('div', { className: 'ds-ok' }, msg) : null),
           webPanel,
           manualOpen ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title' }, '手动录入设备资料'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '名称 *'), el('input', { className: 'ds-input', value: mName, onChange: (e) => setMName(e.target.value), placeholder: '如：深度计 6000m' }), el('span', { className: 'ds-label' }, '厂家'), el('input', { className: 'ds-input', value: mManu, onChange: (e) => setMManu(e.target.value) })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '型号'), el('input', { className: 'ds-input', value: mModel, onChange: (e) => setMModel(e.target.value) }), el('span', { className: 'ds-label' }, '分类'), el('select', { className: 'ds-select', value: mCat, onChange: (e) => setMCat(e.target.value) }, CATEGORIES.map((c) => el('option', { key: c, value: c }, c)))), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '标签'), el('input', { className: 'ds-input', value: mTags, onChange: (e) => setMTags(e.target.value), placeholder: '逗号分隔，如：ROV, 深度计' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '摘要'), el('textarea', { className: 'ds-textarea', value: mSummary, onChange: (e) => setMSummary(e.target.value) })), el('div', { className: 'ds-panel-title', style: { fontSize: 14 } }, '参数'), (mParams.length ? el('table', { className: 'ds-table', style: { marginBottom: 8 } }, el('thead', null, el('tr', null, el('th', null, '参数名'), el('th', null, '值'), el('th', null, '单位'), el('th', null, '说明'), el('th', null, ''))), el('tbody', null, mParams.map((pp, i) => el('tr', { key: i }, el('td', null, el('input', { className: 'ds-input', value: pp.name, onChange: (e) => setParam(mParams, setMParams, i, 'name', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.value, onChange: (e) => setParam(mParams, setMParams, i, 'value', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.unit, onChange: (e) => setParam(mParams, setMParams, i, 'unit', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.desc, onChange: (e) => setParam(mParams, setMParams, i, 'desc', e.target.value) })), el('td', null, el('button', { className: 'ds-btn-danger', onClick: () => setMParams(mParams.filter((_, j) => j !== i)) }, '✕')))))) : null), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setMParams(mParams.concat([{ name: '', value: '', unit: '', desc: '' }])) }, '+ 加一行'), el('button', { className: 'ds-btn', onClick: createManual, disabled: busy }, busy ? '提交中…' : '提交录入'), el('button', { className: 'ds-btn-ghost', onClick: () => setManualOpen(false) }, '取消'))) : null,
           el('div', { className: 'ds-list' }, items.map((it) => el('div', { key: it.id, className: 'ds-item' }, el('div', { className: 'ds-item-row' }, el('input', { type: 'checkbox', checked: compareIds.indexOf(it.id) >= 0, onChange: () => toggleCompare(it.id), onClick: (e) => e.stopPropagation() }), el('div', { className: 'ds-item-main', onClick: () => openDetail(it) }, el('div', { className: 'ds-item-row' }, el('div', { className: 'ds-item-title' }, it.name || it.id), el('span', { className: 'ds-badge' }, it.category || '未分类'), it.type === 'web' ? el('span', { className: 'ds-tag', style: { marginTop: 0 } }, '🌐 网页') : null, it.ocr ? el('span', { className: 'ds-tag', style: { marginTop: 0 } }, '🔍 OCR') : null, enrichingId === it.id ? el('span', { className: 'ds-badge-busy' }, 'AI 抽取中…') : null), el('div', { className: 'ds-item-meta' }, (it.manufacturer || '—') + ' · ' + (it.model || '—') + ' · ' + (it.textLen ? it.textLen + ' 字符' : '手动条目') + (it.enrichedAt ? ' · 🤖 已抽取' : '') + (it.matched && it.matched.length ? ' · 命中: ' + it.matched.join(' ').slice(0, 60) : '')), it.summary ? el('div', { className: 'ds-item-summary' }, it.summary) : null, (it.tags || []).map((t) => el('span', { key: t, className: 'ds-tag' }, t)))))), !items.length ? el('div', { className: 'ds-muted', style: { padding: 20, textAlign: 'center' } }, '暂无条目。上传 PDF/Word 说明书、网页抓取或手动录入开始建立知识库。') : null),
@@ -347,7 +361,7 @@ return {
       const [learnOpen, setLearnOpen] = React.useState(false); const [createOpen, setCreateOpen] = React.useState(false); const [editing, setEditing] = React.useState(null)
       const [lFile, setLFile] = React.useState(null); const [lKind, setLKind] = React.useState('tech'); const [lName, setLName] = React.useState('')
       const [cName, setCName] = React.useState(''); const [cKind, setCKind] = React.useState('tech')
-      const refresh = () => host.call('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch((e) => setErr('加载模板失败：' + String((e && e.message) || e)))
+      const refresh = () => rpc('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch((e) => setErr('加载模板失败：' + String((e && e.message) || e)))
       React.useEffect(() => { refresh() }, [])
       const onLearnFile = (e) => { const f = e.target.files && e.target.files[0]; if (f) { setLFile(f); if (!lName.trim()) setLName(f.name.replace(/\.[^.]+$/, '')) } e.target.value = '' }
       const runLearn = () => {
@@ -356,7 +370,7 @@ return {
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = String(reader.result).split(',')[1] || ''
-          host.call('docsuite/tpl/learn', { fileName: lFile.name, base64: b64, docKind: lKind, name: lName.trim() })
+          rpc('docsuite/tpl/learn', { fileName: lFile.name, base64: b64, docKind: lKind, name: lName.trim() })
             .then((r) => { if (r && r.ok) { setMsg('🧬 学习完成：' + r.template.name + '（' + countSections(r.template.sections) + ' 个章节）'); setLearnOpen(false); setLFile(null); refresh(); setEditing(r.template) } else setErr('学习失败：' + ((r && r.message) || '未知错误')) })
             .catch((e) => setErr('学习异常：' + String((e && e.message) || e))).then(() => setBusy(false))
         }
@@ -366,11 +380,11 @@ return {
       const createTpl = () => {
         if (!cName.trim()) { setErr('请填写模板名称'); return }
         setBusy(true)
-        host.call('docsuite/tpl/create-manual', { name: cName.trim(), docKind: cKind }).then((r) => { if (r && r.ok) { setCreateOpen(false); setCName(''); refresh(); setEditing(r.template) } else setErr('创建失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('创建异常：' + String((e && e.message) || e))).then(() => setBusy(false))
+        rpc('docsuite/tpl/create-manual', { name: cName.trim(), docKind: cKind }).then((r) => { if (r && r.ok) { setCreateOpen(false); setCName(''); refresh(); setEditing(r.template) } else setErr('创建失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('创建异常：' + String((e && e.message) || e))).then(() => setBusy(false))
       }
       const removeTpl = (t) => {
         if (!window.confirm('确认删除模板「' + t.name + '」？')) return
-        host.call('docsuite/tpl/delete', { id: t.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setEditing(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
+        rpc('docsuite/tpl/delete', { id: t.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setEditing(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
       }
       let body
       if (editing) {
@@ -399,37 +413,117 @@ return {
       const renderNode = (node, depth) => el('div', { key: node.id, className: 'ds-tree-node' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-muted', style: { minWidth: 26 } }, String(depth + 1) + '.'), el('input', { className: 'ds-input', value: node.title || '', onChange: (e) => setSections(updateNode(sections, node.id, { title: e.target.value })), placeholder: '章节标题' })), el('div', { className: 'ds-row' }, el('input', { className: 'ds-input', value: node.desc || '', onChange: (e) => setSections(updateNode(sections, node.id, { desc: e.target.value })), placeholder: '本节内容说明' }), el('button', { className: 'ds-btn-ghost', onClick: () => setSections(addChild(sections, node.id, { id: newId(), title: '', desc: '', children: [] })) }, '+ 子节'), el('button', { className: 'ds-btn-danger', onClick: () => setSections(removeNode(sections, node.id)) }, '✕')), (node.children && node.children.length) ? el('div', { className: 'ds-tree-children' }, node.children.map((c) => renderNode(c, depth + 1))) : null)
       const save = () => {
         setSaving(true)
-        host.call('docsuite/tpl/update', { id: tpl.id, patch: { name: name, docKind: kind, sections: sections, style: Object.assign({}, style, { typicalCharts: Array.isArray(style.typicalCharts) ? style.typicalCharts : [] }) } }).then((r) => { if (r && r.ok) props.onSaved(r.template) }).catch(() => {}).then(() => setSaving(false))
+        rpc('docsuite/tpl/update', { id: tpl.id, patch: { name: name, docKind: kind, sections: sections, style: Object.assign({}, style, { typicalCharts: Array.isArray(style.typicalCharts) ? style.typicalCharts : [] }) } }).then((r) => { if (r && r.ok) props.onSaved(r.template) }).catch(() => {}).then(() => setSaving(false))
       }
       return el('div', null, el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-panel-title', style: { margin: 0 } }, '📄 ' + (tpl.name || '模板编辑')), el('span', { className: tpl.kind === 'manual' ? 'ds-badge-violet' : 'ds-badge' }, tpl.kind === 'manual' ? '手工' : 'AI 学习'), el('button', { className: 'ds-btn-ghost', onClick: props.onBack }, '← 返回列表')), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '模板名称'), el('input', { className: 'ds-input', value: name, onChange: (e) => setName(e.target.value) }), el('span', { className: 'ds-label' }, '文档类型'), el('select', { className: 'ds-select', value: kind, onChange: (e) => setKind(e.target.value) }, DOC_KINDS.map((d) => el('option', { key: d.key, value: d.key }, d.label)))), el('hr', { className: 'ds-divider' }), el('div', { className: 'ds-panel-title', style: { fontSize: 14 } }, '章节结构'), sections.map((n) => renderNode(n, 0)), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setSections(sections.concat([{ id: newId(), title: '', desc: '', children: [] }])) }, '+ 添加章节')), el('hr', { className: 'ds-divider' }), el('div', { className: 'ds-panel-title', style: { fontSize: 14 } }, '写作风格'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '整体语气'), el('input', { className: 'ds-input', value: style.tone || '', onChange: (e) => setStyle(Object.assign({}, style, { tone: e.target.value })), placeholder: '如：正式严谨、简洁务实' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '表格偏好'), el('input', { className: 'ds-input', value: style.tablePreference || '', onChange: (e) => setStyle(Object.assign({}, style, { tablePreference: e.target.value })), placeholder: '如：多用参数表' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '典型图表'), el('input', { className: 'ds-input', value: (style.typicalCharts || []).join(', '), onChange: (e) => setStyle(Object.assign({}, style, { typicalCharts: e.target.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean) })), placeholder: '逗号分隔' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '章节篇幅'), el('input', { className: 'ds-input', value: style.lengthPerSection || '', onChange: (e) => setStyle(Object.assign({}, style, { lengthPerSection: e.target.value })), placeholder: '如：每节 500-800 字' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '文风说明'), el('textarea', { className: 'ds-textarea', value: style.writingStyle || '', onChange: (e) => setStyle(Object.assign({}, style, { writingStyle: e.target.value })), placeholder: '其他文风要求' })), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn', onClick: save, disabled: saving }, saving ? '保存中…' : '💾 保存模板'))))
     }
 
+    // ================= 大纲编辑器（创建流程：生成后可编辑，确认后进入写作） =================
+    function OutlineEditor(props) {
+      const project = props.project
+      const [outline, setOutline] = React.useState(project.outline || [])
+      const [saving, setSaving] = React.useState(false)
+      const [err, setErr] = React.useState(null)
+      let seq = 0
+      const newId = () => 'n-' + Date.now().toString(36) + '-' + (seq++)
+      const updateNode = (nodes, id, patch) => nodes.map((n) => n.id === id ? Object.assign({}, n, patch) : Object.assign({}, n, { children: updateNode(n.children || [], id, patch) }))
+      const removeNode = (nodes, id) => nodes.filter((n) => n.id !== id).map((n) => Object.assign({}, n, { children: removeNode(n.children || [], id) }))
+      const addChild = (nodes, parentId) => nodes.map((n) => n.id === parentId ? Object.assign({}, n, { children: (n.children || []).concat([{ id: newId(), title: '', desc: '', children: [] }]) }) : Object.assign({}, n, { children: addChild(n.children || [], parentId) }))
+      const renderNode = (node, depth) => el('div', { key: node.id, className: 'ds-tree-node' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-muted', style: { minWidth: 26 } }, String(depth + 1) + '.'), el('input', { className: 'ds-input', value: node.title || '', onChange: (e) => setOutline(updateNode(outline, node.id, { title: e.target.value })), placeholder: '章节标题' }), el('button', { className: 'ds-btn-ghost', style: { padding: '2px 8px', fontSize: 12 }, onClick: () => setOutline(addChild(outline, node.id)) }, '+ 子节'), el('button', { className: 'ds-btn-danger', style: { padding: '2px 8px', fontSize: 12 }, onClick: () => setOutline(removeNode(outline, node.id)) }, '✕')), el('div', { className: 'ds-row' }, el('input', { className: 'ds-input', value: node.desc || '', onChange: (e) => setOutline(updateNode(outline, node.id, { desc: e.target.value })), placeholder: '本节要点' })), (node.children && node.children.length) ? el('div', { className: 'ds-tree-children' }, node.children.map((c) => renderNode(c, depth + 1))) : null)
+      const confirm = () => {
+        setSaving(true); setErr(null)
+        rpc('docsuite/proj/save-outline', { id: project.id, outline: outline })
+          .then((r) => { if (r && r.ok) { props.onConfirmed(r.project) } else setErr('保存失败：' + ((r && r.message) || '未知')) })
+          .catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setSaving(false))
+      }
+      const count = (nodes) => { let n = 0; const walk = (list) => { for (const s of list || []) { n++; walk(s.children) } }; walk(nodes); return n }
+      return el('div', null,
+        el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' }, el('span', { className: 'ds-panel-title', style: { margin: 0 } }, '📐 大纲编辑'), el('span', { className: 'ds-muted' }, '「' + (project.title || '') + '」 · ' + count(outline) + ' 个章节'), el('button', { className: 'ds-btn', onClick: confirm, disabled: saving }, saving ? '保存中…' : '✅ 确认大纲，开始写作'), el('button', { className: 'ds-btn-ghost', onClick: props.onCancel }, '← 返回')), err ? el('div', { className: 'ds-err' }, err) : null, el('div', { className: 'ds-muted', style: { marginBottom: 8 } }, '可增删章节、修改标题与要点；确认后进入逐章写作。')),
+        el('div', { className: 'ds-panel' }, outline.map((n) => renderNode(n, 0)), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setOutline(outline.concat([{ id: newId(), title: '', desc: '', children: [] }])) }, '+ 添加章节'))))
+    }
     // ================= 文档工坊页面（M3） =================
     function StudioPage() {
       const [projects, setProjects] = React.useState([]); const [templates, setTemplates] = React.useState([]); const [busy, setBusy] = React.useState(false)
       const [err, setErr] = React.useState(null); const [msg, setMsg] = React.useState(null); const [createOpen, setCreateOpen] = React.useState(false); const [active, setActive] = React.useState(null)
       const [nKind, setNKind] = React.useState('tech'); const [nTitle, setNTitle] = React.useState(''); const [nTopic, setNTopic] = React.useState(''); const [nLang, setNLang] = React.useState('zh')
       const [nTpl, setNTpl] = React.useState(''); const [nTechTpl, setNTechTpl] = React.useState(''); const [nMachine, setNMachine] = React.useState('ROV')
-      const refresh = () => { host.call('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }
-      React.useEffect(() => { refresh(); host.call('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch(() => {}) }, [])
+      const [nDocFile, setNDocFile] = React.useState(null); const [nOutlineFile, setNOutlineFile] = React.useState(null)
+      const [outlineDraft, setOutlineDraft] = React.useState(null)
+      const refresh = () => { rpc('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }
+      React.useEffect(() => { refresh(); rpc('docsuite/tpl/list').then((r) => setTemplates((r && r.templates) || [])).catch(() => {}) }, [])
+      const parseOutlineText = (text, name) => {
+        if (/\.json$/i.test(name)) {
+          const parsed = JSON.parse(text)
+          const arr = Array.isArray(parsed) ? parsed : (parsed && parsed.outline)
+          return Array.isArray(arr) ? arr : null
+        }
+        const lines = String(text).split('\n'); const roots = []; const stack = []; let seq = 0
+        for (const raw of lines) {
+          const m = raw.match(/^(#{1,4})\s+(.*)$/)
+          if (!m) continue
+          const level = m[1].length; const title = m[2].trim()
+          const node = { id: 'o-' + Date.now().toString(36) + '-' + (seq++), title: title, desc: '', children: [] }
+          while (stack.length >= level) stack.pop()
+          if (stack.length) stack[stack.length - 1].children.push(node)
+          else roots.push(node)
+          stack.push(node)
+        }
+        return roots.length ? roots : null
+      }
       const createProj = () => {
         if (!nTitle.trim()) { setErr('请填写项目标题'); return }
-        setBusy(true); setErr(null)
-        host.call('docsuite/proj/create', { kind: nKind, title: nTitle.trim(), topic: nTopic.trim(), lang: nLang, templateRef: nTpl || undefined, techTemplateRef: nKind === 'bid' ? (nTechTpl || undefined) : undefined, machineType: nKind === 'test' ? nMachine : undefined })
-          .then((r) => { if (r && r.ok) { setMsg('项目已创建'); setCreateOpen(false); setNTitle(''); setNTopic(''); refresh(); setActive(r.project) } else setErr('创建失败：' + ((r && r.message) || '未知')) })
-          .catch((e) => setErr('创建异常：' + String((e && e.message) || e))).then(() => setBusy(false))
+        if (!nTpl) { setErr('请先选择套用模板'); return }
+        if (!nTopic.trim() && !nDocFile && !nOutlineFile) { setErr('请填写主题描述，或上传需求/参考文档、大纲文件'); return }
+        setBusy(true); setErr(null); setMsg(null)
+        const args = { kind: nKind, title: nTitle.trim(), topic: nTopic.trim(), lang: nLang, templateRef: nTpl }
+        if (nKind === 'bid' && nTechTpl) args.techTemplateRef = nTechTpl
+        if (nKind === 'test' && nMachine) args.machineType = nMachine
+        const runOutline = (proj) => {
+          const after = (r) => {
+            if (!r || !r.ok) { setErr('大纲生成失败：' + ((r && r.message) || '未知')); setBusy(false); return }
+            setOutlineDraft(r.project); setBusy(false)
+          }
+          if (nOutlineFile) {
+            const reader = new FileReader()
+            reader.onload = () => {
+              let parsed = null
+              try { parsed = parseOutlineText(String(reader.result), nOutlineFile.name) } catch (e) { parsed = null }
+              if (!parsed || !parsed.length) { setErr('大纲文件解析失败，请使用 Markdown（# 标题）或 JSON 格式'); setBusy(false); return }
+              rpc('docsuite/proj/gen-outline', { id: proj.id, outline: parsed }).then(after).catch((e) => { setErr('大纲应用异常：' + String((e && e.message) || e)); setBusy(false) })
+            }
+            reader.onerror = () => { setErr('读取大纲文件失败'); setBusy(false) }
+            reader.readAsText(nOutlineFile)
+            return
+          }
+          if (nDocFile) {
+            const reader = new FileReader()
+            reader.onload = () => {
+              const b64 = String(reader.result).split(',')[1] || ''
+              rpc('docsuite/proj/gen-outline-doc', { id: proj.id, fileName: nDocFile.name, base64: b64 }).then(after).catch((e) => { setErr('文档解析异常：' + String((e && e.message) || e)); setBusy(false) })
+            }
+            reader.onerror = () => { setErr('读取文档失败'); setBusy(false) }
+            reader.readAsDataURL(nDocFile)
+            return
+          }
+          rpc('docsuite/proj/gen-outline', { id: proj.id }).then(after).catch((e) => { setErr('大纲生成异常：' + String((e && e.message) || e)); setBusy(false) })
+        }
+        rpc('docsuite/proj/create', args)
+          .then((r) => { if (r && r.ok) { setMsg('项目已创建，正在生成大纲…'); setCreateOpen(false); refresh(); runOutline(r.project) } else { setErr('创建失败：' + ((r && r.message) || '未知')); setBusy(false) } })
+          .catch((e) => { setErr('创建异常：' + String((e && e.message) || e)); setBusy(false) })
       }
       const removeProj = (p) => {
         if (!window.confirm('确认删除项目「' + p.title + '」？')) return
-        host.call('docsuite/proj/delete', { id: p.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setActive(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
+        rpc('docsuite/proj/delete', { id: p.id }).then((r) => { if (r && r.ok) { setMsg('已删除'); setActive(null); refresh() } else setErr('删除失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('删除异常：' + String((e && e.message) || e)))
       }
       let body
-      if (active) {
+      if (outlineDraft) {
+        body = el(OutlineEditor, { project: outlineDraft, onConfirmed: (p) => { setOutlineDraft(null); setActive(p); refresh() }, onCancel: () => { setOutlineDraft(null); refresh() } })
+      } else if (active) {
         body = el(ProjectWorkbench, { project: active, onBack: () => { setActive(null); refresh() }, onChanged: (p) => setActive(p) })
       } else {
         const filteredTpl = templates.filter((t) => t.docKind === nKind); const techTpls = templates.filter((t) => t.docKind === 'tech')
         const toolbar = el('div', { className: 'ds-kb-toolbar' }, el('button', { className: 'ds-btn', onClick: () => setCreateOpen(!createOpen) }, createOpen ? '收起表单' : '📝 新建文档项目'), el('span', { className: 'ds-muted' }, '共 ' + projects.length + ' 个项目'))
-        const createPanel = createOpen ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title' }, '📝 新建文档项目'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '文档类型'), el('select', { className: 'ds-select', value: nKind, onChange: (e) => setNKind(e.target.value) }, DOC_KINDS.map((d) => el('option', { key: d.key, value: d.key }, d.icon + ' ' + d.label)))), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '项目标题 *'), el('input', { className: 'ds-input', value: nTitle, onChange: (e) => setNTitle(e.target.value), placeholder: '如：6000m 级 ROV 总体技术方案' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '主题描述'), el('textarea', { className: 'ds-textarea', value: nTopic, onChange: (e) => setNTopic(e.target.value), placeholder: '项目背景、目标、关键技术点、约束条件等，越具体生成质量越高' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '语言'), el('select', { className: 'ds-select', value: nLang, onChange: (e) => setNLang(e.target.value) }, el('option', { value: 'zh' }, '中文'), el('option', { value: 'en' }, 'English')), nKind === 'test' ? el('span', { className: 'ds-label' }, '机型') : null, nKind === 'test' ? el('select', { className: 'ds-select', value: nMachine, onChange: (e) => setNMachine(e.target.value) }, MACHINE_TYPES.map((m) => el('option', { key: m, value: m }, m))) : null), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '套用模板'), el('select', { className: 'ds-select', value: nTpl, onChange: (e) => setNTpl(e.target.value) }, el('option', { value: '' }, '（不套用，AI 自由生成大纲）'), filteredTpl.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name)))), nKind === 'bid' ? el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '技术方案参考模板'), el('select', { className: 'ds-select', value: nTechTpl, onChange: (e) => setNTechTpl(e.target.value) }, el('option', { value: '' }, '（不指定，AI 按招标要求生成）'), techTpls.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name))), el('span', { className: 'ds-muted' }, '标书「技术方案」部分按此模板生成')) : null, el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn', onClick: createProj, disabled: busy }, busy ? '创建中…' : '创建项目'), el('span', { className: 'ds-muted' }, '创建后进入工作台：大纲 → 逐章生成 → 导出'))) : null
+        const createPanel = createOpen ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title' }, '📝 新建文档项目'), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '文档类型'), el('select', { className: 'ds-select', value: nKind, onChange: (e) => setNKind(e.target.value) }, DOC_KINDS.map((d) => el('option', { key: d.key, value: d.key }, d.icon + ' ' + d.label)))), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '项目标题 *'), el('input', { className: 'ds-input', value: nTitle, onChange: (e) => setNTitle(e.target.value), placeholder: '如：6000m 级 ROV 总体技术方案' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '主题描述'), el('textarea', { className: 'ds-textarea', value: nTopic, onChange: (e) => setNTopic(e.target.value), placeholder: '提出你的需求：项目背景、目标、关键技术点、约束条件等，越具体生成质量越高' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '需求文档'), el('input', { type: 'file', accept: '.pdf,.docx,.txt,.md', className: 'ds-file-btn', onChange: (e) => { const f = e.target.files && e.target.files[0]; setNDocFile(f || null); e.target.value = '' } }), el('span', { className: 'ds-muted' }, nDocFile ? '已选：' + nDocFile.name : '可选：上传需求/参考文档，LLM 将读取后生成大纲')), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '大纲文件'), el('input', { type: 'file', accept: '.md,.json,.txt', className: 'ds-file-btn', onChange: (e) => { const f = e.target.files && e.target.files[0]; setNOutlineFile(f || null); e.target.value = '' } }), el('span', { className: 'ds-muted' }, nOutlineFile ? '已选：' + nOutlineFile.name : '可选：直接用你已有的 Markdown/JSON 大纲')), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '语言'), el('select', { className: 'ds-select', value: nLang, onChange: (e) => setNLang(e.target.value) }, el('option', { value: 'zh' }, '中文'), el('option', { value: 'en' }, 'English')), nKind === 'test' ? el('span', { className: 'ds-label' }, '机型') : null, nKind === 'test' ? el('select', { className: 'ds-select', value: nMachine, onChange: (e) => setNMachine(e.target.value) }, MACHINE_TYPES.map((m) => el('option', { key: m, value: m }, m))) : null), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '套用模板'), el('select', { className: 'ds-select', value: nTpl, onChange: (e) => setNTpl(e.target.value) }, el('option', { value: '' }, '（请选择模板…）'), filteredTpl.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name)))), nKind === 'bid' ? el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '技术方案参考模板'), el('select', { className: 'ds-select', value: nTechTpl, onChange: (e) => setNTechTpl(e.target.value) }, el('option', { value: '' }, '（不指定，AI 按招标要求生成）'), techTpls.map((t) => el('option', { key: t.id, value: t.id }, (t.kind === 'manual' ? '[手工] ' : '[学习] ') + t.name))), el('span', { className: 'ds-muted' }, '标书「技术方案」部分按此模板生成')) : null, el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn', onClick: createProj, disabled: busy }, busy ? '创建中…' : '🚀 创建并生成大纲'), el('span', { className: 'ds-muted' }, '生成大纲后可编辑，确认后再进入写作'))) : null
         const list = el('div', { className: 'ds-list' }, projects.map((p) => el('div', { key: p.id, className: 'ds-item' }, el('div', { className: 'ds-item-row' }, el('div', { className: 'ds-item-main', onClick: () => setActive(p) }, el('div', { className: 'ds-item-row' }, el('span', { className: 'ds-card-icon', style: { fontSize: 18 } }, kindIcon(p.kind)), el('div', { className: 'ds-item-title' }, p.title || p.id), el('span', { className: 'ds-badge' }, kindLabel(p.kind)), p.status ? el('span', { className: 'ds-badge-violet' }, statusText(p.status)) : null), el('div', { className: 'ds-item-meta' }, (p.topic || '').slice(0, 80) + ' · ' + leafList(p.outline).length + ' 个章节' + (p.machineType ? ' · ' + p.machineType : ''))), el('button', { className: 'ds-btn-danger', onClick: () => removeProj(p) }, '🗑')))), !projects.length ? el('div', { className: 'ds-muted', style: { padding: 20, textAlign: 'center' } }, '暂无项目。点击「📝 新建文档项目」开始。') : null)
         body = el('div', null, el('div', { className: 'ds-panel' }, toolbar, err ? el('div', { className: 'ds-err' }, err) : null, msg ? el('div', { className: 'ds-ok' }, msg) : null), createPanel, list)
       }
@@ -444,21 +538,21 @@ return {
       const update = (next) => { setP(next); props.onChanged(next) }
       const leaves = leafList(p.outline || []); const matrix = p.bidMatrix || []; const terms = p.bidTerms || {}; const schedule = p.bidSchedule || []; const bidStruct = p.bidStructure || {}
       React.useEffect(() => { if (terms && terms.deliveryDays && !deliveryDays) setDeliveryDays(String(terms.deliveryDays)) }, [])
-      const genOutline = () => { setBusy(true); setErr(null); setMsg(null); host.call('docsuite/proj/gen-outline', { id: p.id }).then((r) => { if (r && r.ok) { update(r.project); setMsg('大纲已生成：' + leafList(r.project.outline).length + ' 个章节') } else setErr('大纲生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('大纲异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
-      const genSection = (nodeId) => { setGenNodeId(nodeId); setErr(null); setMsg(null); host.call('docsuite/proj/gen-section', { id: p.id, nodeId: nodeId }).then((r) => { if (r && r.ok) { update(r.project); setMsg('章节已生成' + (r.refs ? '，引用 ' + r.refs + ' 条知识' : '')) } else setErr('章节生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('章节异常：' + String((e && e.message) || e))).then(() => setGenNodeId(null)) }
+      const genOutline = () => { setBusy(true); setErr(null); setMsg(null); rpc('docsuite/proj/gen-outline', { id: p.id }).then((r) => { if (r && r.ok) { update(r.project); setMsg('大纲已生成：' + leafList(r.project.outline).length + ' 个章节') } else setErr('大纲生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('大纲异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
+      const genSection = (nodeId) => { setGenNodeId(nodeId); setErr(null); setMsg(null); rpc('docsuite/proj/gen-section', { id: p.id, nodeId: nodeId }).then((r) => { if (r && r.ok) { update(r.project); setMsg('章节已生成' + (r.refs ? '，引用 ' + r.refs + ' 条知识' : '')) } else setErr('章节生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('章节异常：' + String((e && e.message) || e))).then(() => setGenNodeId(null)) }
       const genAll = () => {
         const ids = leaves.map((l) => l[l.length - 1].id).filter((id) => !(p.sections && p.sections[id]))
         if (!ids.length) { setMsg('所有章节均已生成'); return }
         setBusy(true); setErr(null); setMsg(null)
         let idx = 0
-        const next = () => { if (idx >= ids.length) { setBusy(false); setMsg('全部章节生成完成'); return } const id = ids[idx]; idx++; host.call('docsuite/proj/gen-section', { id: p.id, nodeId: id }).then((r) => { if (r && r.ok) { update(r.project); setMsg('正在生成 ' + idx + '/' + ids.length + '…') } else setErr('章节生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('章节异常：' + String((e && e.message) || e))).then(() => next()) }
+        const next = () => { if (idx >= ids.length) { setBusy(false); setMsg('全部章节生成完成'); return } const id = ids[idx]; idx++; rpc('docsuite/proj/gen-section', { id: p.id, nodeId: id }).then((r) => { if (r && r.ok) { update(r.project); setMsg('正在生成 ' + idx + '/' + ids.length + '…') } else setErr('章节生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('章节异常：' + String((e && e.message) || e))).then(() => next()) }
         next()
       }
-      const saveSection = () => { if (!editNode) return; setBusy(true); host.call('docsuite/proj/save-section', { id: p.id, nodeId: editNode, content: editText }).then((r) => { if (r && r.ok) { update(r.project); setEditNode(null); setMsg('章节已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
-      const saveOutline = () => { setBusy(true); host.call('docsuite/proj/save-outline', { id: p.id, outline: p.outline }).then((r) => { if (r && r.ok) { update(r.project); setMsg('大纲已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
+      const saveSection = () => { if (!editNode) return; setBusy(true); rpc('docsuite/proj/save-section', { id: p.id, nodeId: editNode, content: editText }).then((r) => { if (r && r.ok) { update(r.project); setEditNode(null); setMsg('章节已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
+      const saveOutline = () => { setBusy(true); rpc('docsuite/proj/save-outline', { id: p.id, outline: p.outline }).then((r) => { if (r && r.ok) { update(r.project); setMsg('大纲已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e))).then(() => setBusy(false)) }
       const doExport = (format) => {
         setExporting(format); setErr(null)
-        host.call('docsuite/proj/export', { id: p.id, format: format }).then((r) => {
+        rpc('docsuite/proj/export', { id: p.id, format: format }).then((r) => {
           if (!r || !r.ok) { setErr('导出失败：' + ((r && r.message) || '未知')); return }
           if (format === 'md') {
             const blob = new Blob([r.content], { type: 'text/markdown;charset=utf-8' }); const url = URL.createObjectURL(blob)
@@ -479,21 +573,22 @@ return {
         const reader = new FileReader()
         reader.onload = () => {
           const b64 = String(reader.result).split(',')[1] || ''
-          host.call('docsuite/proj/bid-parse', { id: p.id, fileName: bidFile.name, base64: b64 })
+          rpc('docsuite/proj/bid-parse', { id: p.id, fileName: bidFile.name, base64: b64 })
             .then((r) => { if (r && r.ok) { update(r.project); setMsg('已提取 ' + r.count + ' 条要求' + (r.terms && r.terms.deliveryText ? '，交货期：' + r.terms.deliveryText : '')); if (r.project.bidTerms && r.project.bidTerms.deliveryDays) setDeliveryDays(String(r.project.bidTerms.deliveryDays)); setBidFile(null) } else setErr('解析失败：' + ((r && r.message) || '未知')) })
             .catch((e) => setErr('解析异常：' + String((e && e.message) || e))).then(() => setBusy(false))
         }
         reader.onerror = () => { setBusy(false); setErr('读取文件失败') }
         reader.readAsDataURL(bidFile)
       }
-      const genBidAnswer = (idx) => { setBidGenIdx(idx); setErr(null); host.call('docsuite/proj/bid-answer', { id: p.id, index: idx }).then((r) => { if (r && r.ok) { update(r.project); setMsg('应答已生成' + (r.refs ? '，引用 ' + r.refs + ' 条知识' : '')) } else setErr('应答生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('应答异常：' + String((e && e.message) || e))).then(() => setBidGenIdx(null)) }
+      const genBidAnswer = (idx) => { setBidGenIdx(idx); setErr(null); rpc('docsuite/proj/bid-answer', { id: p.id, index: idx }).then((r) => { if (r && r.ok) { update(r.project); setMsg('应答已生成' + (r.refs ? '，引用 ' + r.refs + ' 条知识' : '')) } else setErr('应答生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('应答异常：' + String((e && e.message) || e))).then(() => setBidGenIdx(null)) }
       const saveBidAnswer = (idx, val) => {
         const next = matrix.map((row, i) => i === idx ? Object.assign({}, row, { answer: val }) : row)
-        host.call('docsuite/proj/save-outline', { id: p.id, bidMatrix: next }).then((r) => { if (r && r.ok) { update(r.project); setMsg('应答已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e)))
+        rpc('docsuite/proj/save-outline', { id: p.id, bidMatrix: next }).then((r) => { if (r && r.ok) { update(r.project); setMsg('应答已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e)))
       }
       const genSchedule = () => {
         setScheduleBusy(true); setErr(null); setMsg(null)
-        host.call('docsuite/proj/bid-schedule', { id: p.id, contractDate: contractDate, deliveryDays: parseInt(deliveryDays, 10) || undefined })
+        const d = parseInt(deliveryDays, 10); const sargs = { id: p.id, contractDate: contractDate }; if (d > 0) sargs.deliveryDays = d
+        rpc('docsuite/proj/bid-schedule', sargs)
           .then((r) => { if (r && r.ok) { update(r.project); setMsg('时间节点安排已生成（' + (r.project.bidSchedule || []).length + ' 个阶段）') } else setErr('生成失败：' + ((r && r.message) || '未知')) })
           .catch((e) => setErr('生成异常：' + String((e && e.message) || e))).then(() => setScheduleBusy(false))
       }
@@ -519,16 +614,16 @@ return {
       const [projects, setProjects] = React.useState([]); const [selId, setSelId] = React.useState(''); const [theme, setTheme] = React.useState('ocean')
       const [slides, setSlides] = React.useState(null); const [busy, setBusy] = React.useState(false); const [exporting, setExporting] = React.useState(false)
       const [err, setErr] = React.useState(null); const [msg, setMsg] = React.useState(null)
-      React.useEffect(() => { host.call('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }, [])
+      React.useEffect(() => { rpc('docsuite/proj/list').then((r) => setProjects((r && r.projects) || [])).catch((e) => setErr('加载项目失败：' + String((e && e.message) || e))) }, [])
       const genSlides = () => {
         if (!selId) { setErr('请先选择文档项目'); return }
         setBusy(true); setErr(null); setMsg(null); setSlides(null)
-        host.call('docsuite/ppt/preview', { id: selId }).then((r) => { if (r && r.ok) { setSlides(r.slides); setMsg('已生成 ' + r.slides.length + ' 页幻灯片') } else setErr('生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('生成异常：' + String((e && e.message) || e))).then(() => setBusy(false))
+        rpc('docsuite/ppt/preview', { id: selId }).then((r) => { if (r && r.ok) { setSlides(r.slides); setMsg('已生成 ' + r.slides.length + ' 页幻灯片') } else setErr('生成失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('生成异常：' + String((e && e.message) || e))).then(() => setBusy(false))
       }
       const doExport = () => {
         if (!slides || !slides.length) { setErr('请先生成幻灯片'); return }
         setExporting(true); setErr(null)
-        host.call('docsuite/ppt/export', { slides: slides, theme: theme, title: (projects.find((x) => x.id === selId) || {}).title || 'presentation' })
+        rpc('docsuite/ppt/export', { slides: slides, theme: theme, title: (projects.find((x) => x.id === selId) || {}).title || 'presentation' })
           .then((r) => {
             if (!r || !r.ok) { setErr('导出失败：' + ((r && r.message) || '未知')); return }
             const bin = atob(r.base64); const bytes = new Uint8Array(bin.length)
@@ -545,7 +640,7 @@ return {
 
     function DocSuiteApp() {
       const [page, setPage] = React.useState('home'); const [sum, setSum] = React.useState(null); const [err, setErr] = React.useState(null)
-      React.useEffect(() => { host.call('docsuite/state/summary').then(setSum).catch((e) => setErr(String((e && e.message) || e))) }, [])
+      React.useEffect(() => { rpc('docsuite/state/summary').then(setSum).catch((e) => setErr(String((e && e.message) || e))) }, [])
       let body = null
       if (page === 'settings') body = el(SettingsContent, null)
       else if (page === 'home') body = el(Home, { sum: sum, onOpen: (k) => setPage(k) })
