@@ -816,9 +816,10 @@ return {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }; if (!llm) return { ok: false, message: 'LLM 服务不可用' }
       const item = await readItem(id); if (!item) return { ok: false, message: '条目不存在' }
       const dir = await dataDir(); const srcId = item.sourceDir || id
-      let text = ''
-      try { const t = await fs.resolve(joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')); const info = await fs.stat(t); if (info) text = (await fs.readText(t)).slice(0, 50000) } catch (e) { text = '' }
-      if (!text) return { ok: false, message: '该条目无可抽取的文本' }
+      const textPath = joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')
+      let text = ''; let readErr = ''
+      try { const t = await fs.resolve(textPath); const info = await fs.stat(t); if (info) text = (await fs.readText(t)).slice(0, 50000) } catch (e) { readErr = String((e && e.message) || e) }
+      if (!text) return { ok: false, message: '该条目无可抽取的文本（目录:' + dir + '；路径:' + textPath + (readErr ? '；错误:' + readErr : '；文件存在但内容为空') + '）' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是水下机器人（ROV/AUV）领域的资深技术文档分析助手。你擅长识别不同型号并提取结构化技术参数、撰写精炼摘要。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n【重要】文档中可能包含「表格数据」：表格用 | 分隔每行的各列，同一行各列表示【同一个型号】的一组参数（第一行常为表头，如：型号|参数1|参数2|...）。请严格按表格的行列对应关系识别每个型号及其参数，确保参数归属到正确的型号，不要张冠李戴；正文中提及的参数也要并入对应型号。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本（含表格，| 分隔每行各列）：\n' + text
