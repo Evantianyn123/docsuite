@@ -834,6 +834,7 @@ setEditNode] = React.useState(null); const [editText, setEditText] = React.useSt
 setExporting] = React.useState(null)
       const [contractDate, setContractDate] = React.useState(new Date().toISOString().slice(0, 10)); const [deliveryDays,
 setDeliveryDays] = React.useState(''); const [scheduleBusy, setScheduleBusy] = React.useState(false)
+      const [editOutline, setEditOutline] = React.useState(false)
       const update = (next) => { setP(next); props.onChanged(next) }
       const leaves = leafList(p.outline || []); const matrix = p.bidMatrix || []; const terms = p.bidTerms || {}; const schedule = p.bidSchedule || []; const bidStruct = p.bidStructure || {}
       React.useEffect(() => { if (terms && terms.deliveryDays && !deliveryDays) setDeliveryDays(String(terms.deliveryDays)) },
@@ -892,6 +893,11 @@ setDeliveryDays] = React.useState(''); const [scheduleBusy, setScheduleBusy] = R
         const next = matrix.map((row, i) => i === idx ? Object.assign({}, row, { answer: val }) : row)
         rpc('docsuite/proj/save-outline', { id: p.id, bidMatrix: next }).then((r) => { if (r && r.ok) { update(r.project); setMsg('应答已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e)))
       }
+      const saveBidStatus = (idx, val) => {
+        const next = matrix.map((row, i) => i === idx ? Object.assign({}, row, { status: val }) : row)
+        rpc('docsuite/proj/save-outline', { id: p.id, bidMatrix: next }).then((r) => { if (r && r.ok) { update(r.project); setMsg('偏离情况已保存') } else setErr('保存失败：' + ((r && r.message) || '未知')) }).catch((e) => setErr('保存异常：' + String((e && e.message) || e)))
+      }
+      const bidStatusText = (st) => st === 'full' ? '无偏离' : st === 'positive' ? '正偏离' : st === 'negative' ? '负偏离' : st === 'na' ? '不适用' : (st === 'pending' ? '未应答' : (st || '未应答'))
       const genSchedule = () => {
         setScheduleBusy(true); setErr(null); setMsg(null)
         const d = parseInt(deliveryDays, 10); const sargs = { id: p.id, contractDate: contractDate }; if (d > 0) sargs.deliveryDays = d
@@ -912,7 +918,9 @@ fontSize: 12 }, onClick: () => { setViewNode(n.id); setEditNode(null) } }, '👁
 '✏️ 编辑') : null, refsOf(n.id).length ? el('span', { className: 'ds-tag', style: { marginTop: 0 } },
 '📎 ' + refsOf(n.id).length) : null), renderOutline(n.children, depth + 1))))
       let body
-      if (viewNode) { body = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' },
+      if (editOutline) { body = el(OutlineEditor, { project: p, onConfirmed: (np) => { update(np); setEditOutline(false); setMsg('大纲已更新') },
+onCancel: () => setEditOutline(false) }) }
+      else if (viewNode) { body = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' },
 el('button', { className: 'ds-btn-ghost', onClick: () => setViewNode(null) }, '← 返回大纲'), el('span',
 { className: 'ds-panel-title', style: { margin: 0 } }, '章节预览')), el(MarkdownView, { text: (p.sections && p.sections[viewNode]) || '（空）' })) }
       else if (editNode) { body = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' },
@@ -924,8 +932,9 @@ busy ? '保存中…' : '💾 保存章节'), el('span', { className: 'ds-muted'
 { text: editText.slice(0, 400) })) }
       else {
         const toolbar = el('div', { className: 'ds-kb-toolbar' }, el('button', { className: 'ds-btn',
-onClick: genOutline, disabled: busy }, '🪄 生成大纲'), el('button', { className: 'ds-btn-ghost', onClick: saveOutline,
-disabled: busy }, '💾 保存大纲'), el('button', { className: 'ds-btn-ghost', onClick: genAll, disabled: busy || !leaves.length },
+onClick: genOutline, disabled: busy }, '🪄 生成大纲'), el('button', { className: 'ds-btn-ghost', onClick: () => setEditOutline(true),
+disabled: busy }, '✏️ 编辑大纲'), el('button', { className: 'ds-btn-ghost', onClick: saveOutline, disabled: busy },
+'💾 保存大纲'), el('button', { className: 'ds-btn-ghost', onClick: genAll, disabled: busy || !leaves.length },
 '⚡ 一键生成全部章节'), el('button', { className: 'ds-btn-ghost', onClick: () => doExport('md'), disabled: exporting !== null },
 exporting === 'md' ? '导出中…' : '⬇️ Markdown'), el('button', { className: 'ds-btn-ghost', onClick: () => doExport('docx'),
 disabled: exporting !== null }, exporting === 'docx' ? '导出中…' : '⬇️ Word'), el('button', { className: 'ds-btn-ghost',
@@ -966,21 +975,27 @@ el('td', null, s.end), el('td', null, s.desc))))) : el('div', { className: 'ds-m
         const bidPanel = p.kind === 'bid' ? el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title',
 style: { fontSize: 14 } }, '🏆 招标需求响应矩阵'), el('div', { className: 'ds-kb-toolbar' }, el('input', { type: 'file',
 accept: '.pdf,.docx,.txt', className: 'ds-file-btn', onChange: onBidFile }), el('button', { className: 'ds-btn',
-onClick: runBidParse, disabled: busy || !bidFile }, busy ? '解析中…' : '上传招标文件并提取要求'), el('span', { className: 'ds-muted' },
-matrix.length + ' 条要求')), matrix.length ? el('table', { className: 'ds-table' }, el('thead', null,
-el('tr', null, el('th', { style: { width: 40 } }, '#'), el('th', { style: { width: 70 } }, '类型'),
-el('th', null, '招标要求'), el('th', null, '应答 / 偏离'), el('th', { style: { width: 100 } }, ''))), el('tbody',
+onClick: runBidParse, disabled: busy || !bidFile }, busy ? '解析中…' : '上传招标文件并自动生成矩阵'), el('span', { className: 'ds-muted' },
+matrix.length + ' 条要求 · 自动从技术要求分类提取')), matrix.length ? el('table', { className: 'ds-table' }, el('thead',
+null, el('tr', null, el('th', { style: { width: 40 } }, '序号'), el('th', null, '招标要求'), el('th', null,
+'响应内容'), el('th', { style: { width: 100 } }, '偏离情况'), el('th', { style: { width: 110 } }, ''))), el('tbody',
 null, matrix.map((row, idx) => el('tr', { key: idx }, el('td', null, row.no || (idx + 1)), el('td',
-null, row.category || '技术'), el('td', null, el('div', { className: 'ds-muted' }, (row.chapter || '') + (row.chapter ? '　' : '') + row.requirement)),
-el('td', null, row.answer ? el('div', { className: 'ds-item-summary', style: { WebkitLineClamp: 6 } },
-row.answer) : el('span', { className: 'ds-muted' }, '（未应答）')), el('td', null, el('div', { className: 'ds-row',
-style: { marginBottom: 0 } }, el('button', { className: 'ds-btn-ghost', style: { padding: '2px 8px',
-fontSize: 12 }, onClick: () => genBidAnswer(idx), disabled: bidGenIdx === idx }, bidGenIdx === idx ? '…' : '⚡ 应答'),
-el('textarea', { className: 'ds-textarea', style: { minHeight: 50 }, value: row.answer || '', onChange: (e) => saveBidAnswer(idx,
-e.target.value), placeholder: '手动编辑应答' }))))))) : el('div', { className: 'ds-muted' }, '上传招标文件后自动提取要求清单，可逐条 AI 应答。')) : null
-        const outlinePanel = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-panel-title',
-style: { fontSize: 14 } }, '章节大纲（' + leaves.length + ' 个章节）'), renderOutline(p.outline || [], 0),
-!leaves.length ? el('div', { className: 'ds-muted' }, '点击「🪄 生成大纲」创建章节结构。') : null)
+null, el('div', { className: 'ds-muted' }, (row.category ? '【' + row.category + '】' : '') + (row.chapter ? '（' + row.chapter + '）' : '')) + (row.requirement || '')),
+el('td', null, row.answer ? el('div', { className: 'ds-item-summary', style: { WebkitLineClamp: 8 } },
+row.answer) : el('span', { className: 'ds-muted' }, '（未应答）')), el('td', null, el('select', { className: 'ds-select',
+value: row.status || 'pending', onChange: (e) => saveBidStatus(idx, e.target.value) }, el('option',
+{ value: 'pending' }, '未应答'), el('option', { value: 'full' }, '无偏离'), el('option', { value: 'positive' },
+'正偏离'), el('option', { value: 'negative' }, '负偏离'), el('option', { value: 'na' }, '不适用'))), el('td',
+null, el('div', { className: 'ds-row', style: { marginBottom: 0 } }, el('button', { className: 'ds-btn-ghost',
+style: { padding: '2px 8px', fontSize: 12 }, onClick: () => genBidAnswer(idx), disabled: bidGenIdx === idx },
+bidGenIdx === idx ? '…' : '⚡ 应答'), el('textarea', { className: 'ds-textarea', style: { minHeight: 50 },
+value: row.answer || '', onChange: (e) => saveBidAnswer(idx, e.target.value), placeholder: '手动编辑响应内容' }))))))) : el('div',
+{ className: 'ds-muted' }, '上传招标文件后自动生成响应矩阵（无明确表格时从技术要求自动分类提取），可逐条 AI 应答并标记偏离情况。')) : null
+        const outlinePanel = el('div', { className: 'ds-panel' }, el('div', { className: 'ds-row' },
+el('div', { className: 'ds-panel-title', style: { margin: 0, fontSize: 14 } }, '章节大纲（' + leaves.length + ' 个章节）'),
+el('button', { className: 'ds-btn-ghost', style: { padding: '2px 10px', fontSize: 12 }, onClick: () => setEditOutline(true) },
+'✏️ 编辑大纲')), renderOutline(p.outline || [], 0), !leaves.length ? el('div', { className: 'ds-muted' },
+'点击「🪄 生成大纲」创建章节结构。') : null)
         body = el('div', null, header, structPanel, termsPanel, bidPanel, outlinePanel)
       }
       return el('div', null, body)

@@ -1150,6 +1150,14 @@ it ? { name: it.name || rid, model: it.model || '' } : null) } }
     }
     function refName(id) { const v = refNameCache.get(id); return v || null }
     function mdEscapeCell(s) { return String(s || '').replace(/\|/g, '\\|').replace(/\n/g, '<br/>') }
+    function bidStatusText(st) {
+      if (st === 'full') return '无偏离'
+      if (st === 'positive') return '正偏离'
+      if (st === 'negative') return '负偏离'
+      if (st === 'na') return '不适用'
+      if (st === 'pending') return '未应答'
+      return st || '未应答'
+    }
     function buildMarkdown(proj) {
       const lines = []; lines.push('# ' + proj.title); lines.push('')
       if (proj.topic) lines.push('> ' + proj.topic)
@@ -1157,9 +1165,9 @@ it ? { name: it.name || rid, model: it.model || '' } : null) } }
       if (proj.kind === 'bid') {
         lines.push('# 第一部分 响应文件'); lines.push('')
         if (proj.bidMatrix && proj.bidMatrix.length) {
-          lines.push('## 一、招标要求响应表'); lines.push(''); lines.push('| 序号 | 类别 | 招标要求 | 应答 |'); lines.push('| --- | --- | --- | --- |')
-          for (const r of proj.bidMatrix) lines.push('| ' + mdEscapeCell(r.no) + ' | ' + mdEscapeCell(r.category) + ' | ' + mdEscapeCell(r.requirement).slice(0,
-200) + ' | ' + mdEscapeCell(r.answer || '（未应答）').slice(0, 300) + ' |')
+          lines.push('## 一、招标要求响应表'); lines.push(''); lines.push('| 序号 | 招标要求 | 响应内容 | 偏离情况 |'); lines.push('| --- | --- | --- | --- |')
+          for (const r of proj.bidMatrix) lines.push('| ' + mdEscapeCell(r.no) + ' | ' + mdEscapeCell(r.requirement).slice(0,
+300) + ' | ' + mdEscapeCell(r.answer || '（未应答）').slice(0, 400) + ' | ' + mdEscapeCell(bidStatusText(r.status)) + ' |')
           lines.push('')
         }
         const terms = proj.bidTerms || {}
@@ -1334,12 +1342,12 @@ message: '要求不存在' }
       if (kb && kb.items && kb.items.length) { refIds = kb.items.map((it) => it.id); kbText = '\n\n可参考知识库：\n' + kb.items.map((it) => '- [' + it.name + ']：' + (it.summary || '') + '；参数：' + (it.params || []).slice(0,
 6).map((pp) => pp.name + ' ' + (pp.value || '') + (pp.unit || '')).join('、')).join('\n') }
       const system = '你是投标技术文件撰写专家。你撰写的应答专业、具体、以事实和数据支撑。只输出应答正文。'
-      const userPrompt = '请对以下招标要求撰写投标应答（100-300 字，说明我方如何满足要求，给出具体指标/方案；若无法满足或部分满足，明确说明偏离及理由）。\n招标要求（' + row.category + '）：' + row.requirement + '\n来源：' + (row.chapter || '') + '\n项目：' + proj.title + '\n主题：' + proj.topic + kbText + '\n\n请以「响应：」或「偏离：」或「不适用：」开头。'
+      const userPrompt = '请对以下招标要求撰写投标应答（100-300 字，说明我方如何满足要求，给出具体指标/方案）。\n招标要求（' + row.category + '）：' + row.requirement + '\n来源：' + (row.chapter || '') + '\n项目：' + proj.title + '\n主题：' + proj.topic + kbText + '\n\n请以「响应：」开头表示完全满足（无偏离）；若我方指标优于或超出招标要求，以「正偏离：」开头并说明超出内容；若无法完全满足（部分满足或达不到），以「负偏离：」开头并说明偏离项与理由；完全不适用时以「不适用：」开头。'
       const res = await llmText(route, system, userPrompt, 1500)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const answer = (res.text || res.reasoning || '').trim()
       if (!answer) return { ok: false, message: '模型未返回内容' }
-      const type = /^偏离/.test(answer) ? 'deviation' : /^不适用/.test(answer) ? 'na' : 'responded'
+      const type = /^正偏离/.test(answer) ? 'positive' : /^负偏离/.test(answer) ? 'negative' : /^响应/.test(answer) ? 'full' : /^不适用/.test(answer) ? 'na' : (/^偏离/.test(answer) ? 'negative' : 'full')
       proj.bidMatrix[idx] = Object.assign({}, row, { answer: answer, status: type })
       await writeProj(proj)
       return { ok: true, project: proj, refs: refIds.length }
