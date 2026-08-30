@@ -14,7 +14,9 @@ if (!inFile) { console.error('用法: node tools/wrap-lines.js <in.js> <out.js>'
 const src = fs.readFileSync(inFile, 'utf8')
 const lines = src.split('\n')
 const out = []
-const MAX = 96
+// 折行阈值：read 工具的整行显示截断在 2000 字符，留安全余量取 1200。
+// 阈值越高折行越少，行数越接近 src（此前 96 导致行数暴涨 30%，徒增读取/抄写开销）。
+const MAX = parseInt(process.env.WRAP_MAX || '1200', 10) || 1200
 
 function wrapLine(line) {
   if (line.length <= MAX) return [line]
