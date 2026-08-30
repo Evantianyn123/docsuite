@@ -626,6 +626,14 @@ return {
         return out
       } catch (e) { return [] }
     }
+    // 全部可选分类：内置默认 + 知识库中已使用过的分类（去重），供下拉选择/自由输入
+    async function allCategories() {
+      const set = new Set()
+      for (const c of CATEGORIES) set.add(c)
+      const items = await listItems()
+      for (const it of items) { const c = String(it.category || '').trim(); if (c) set.add(c) }
+      return Array.from(set)
+    }
     async function ensureIndex() {
       if (indexCache && !indexDirty) return indexCache
       await reconcileOrphans()
@@ -1373,8 +1381,8 @@ return {
     register('docsuite/env/check', async () => envCheck())
     register('docsuite/env/setup-python', async () => ensurePythonToolchain())
     register('docsuite/state/summary', async () => summary())
-    register('docsuite/kb/list', async () => { await reconcileOrphans(); return { items: (await listItems()).map(slim) } })
-    register('docsuite/kb/search', async (args) => searchItems(args || {}))
+    register('docsuite/kb/list', async () => { await reconcileOrphans(); const items = (await listItems()).map(slim); return { items: items, categories: await allCategories() } })
+    register('docsuite/kb/search', async (args) => { const r = await searchItems(args || {}); return Object.assign({}, r, { categories: await allCategories() }) })
     register('docsuite/kb/upload', async (args) => uploadItem(args || {}))
     register('docsuite/kb/enrich', async (args) => enrichItem(args || {}))
     register('docsuite/kb/reocr', async (args) => reOcrItem(args || {}))

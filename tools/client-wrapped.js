@@ -249,10 +249,31 @@ m.icon), el('div', { className: 'ds-card-title' }, m.title), el('div', { classNa
 m.desc)))))
     }
 
+    // 分类选择：下拉（已用/内置分类直接选）+ 自由输入（选「其他」或不在列表中时输入，保存后下次自动可选）
+    function CategoryInput(props) {
+      const cats = props.categories || []
+      const val = props.value || ''
+      const known = cats.indexOf(val) >= 0
+      const [mode, setMode] = React.useState(known ? 'select' : 'input')
+      React.useEffect(() => { setMode(cats.indexOf(val) >= 0 ? 'select' : 'input') }, [val, cats.length])
+      if (mode === 'input') {
+        return el('span', { className: 'ds-row', style: { flex: 1, minWidth: 220, marginBottom: 0 } },
+          el('input', { className: 'ds-input', list: 'ds-cat-suggest', value: val, onChange: (e) => props.onChange(e.target.value),
+placeholder: props.placeholder || '输入新分类' }),
+          el('button', { className: 'ds-btn-ghost', onClick: () => setMode('select') }, '⬇ 从列表选'))
+      }
+      return el('span', { className: 'ds-row', style: { flex: 1, minWidth: 220, marginBottom: 0 } },
+        el('select', { className: 'ds-select', style: { flex: 1, minWidth: 0 }, value: val, onChange: (e) => { if (e.target.value === '__custom__') { setMode('input'); props.onChange('') } else props.onChange(e.target.value) } },
+          cats.map((c) => el('option', { key: c, value: c }, c)),
+          el('option', { value: '__custom__' }, '✏️ 其他（自定义输入）…')),
+        el('button', { className: 'ds-btn-ghost', onClick: () => setMode('input') }, '✏️'))
+    }
+
     // ================= 知识库页面（M1+M5） =================
     function KBPage() {
       const [py, setPy] = React.useState(null); const [q, setQ] = React.useState(''); const [cat,
 setCat] = React.useState('')
+      const [cats, setCats] = React.useState([])
       const [items, setItems] = React.useState([]); const [total, setTotal] = React.useState(0); const [busy,
 setBusy] = React.useState(false)
       const [err, setErr] = React.useState(null); const [msg, setMsg] = React.useState(null)
@@ -265,8 +286,8 @@ setWebImporting] = React.useState(null); const [ocrId, setOcrId] = React.useStat
       const refresh = () => {
         const query = q.trim()
         if (query) { const sargs = { q: query, page: 1, pageSize: 100 }; if (cat) sargs.category = cat; rpc('docsuite/kb/search',
-sargs).then((r) => { setItems((r && r.items) || []); setTotal((r && r.total) || 0) }).catch((e) => setErr('检索失败：' + String((e && e.message) || e))) }
-        else { rpc('docsuite/kb/list').then((r) => { const list = (r && r.items) || []; setItems(list); setTotal(list.length) }).catch((e) => setErr('加载失败：' + String((e && e.message) || e))) }
+sargs).then((r) => { setItems((r && r.items) || []); setTotal((r && r.total) || 0); setCats((r && r.categories) || []) }).catch((e) => setErr('检索失败：' + String((e && e.message) || e))) }
+        else { rpc('docsuite/kb/list').then((r) => { const list = (r && r.items) || []; setItems(list); setTotal(list.length); setCats((r && r.categories) || []) }).catch((e) => setErr('加载失败：' + String((e && e.message) || e))) }
       }
       const enrichItem = (id) => {
         setEnrichingId(id); setErr(null); setMsg(null)
@@ -420,10 +441,10 @@ onClick: downloadSource }, '⬇️ 下载源文件'), el('button', { className: 
             el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '厂家'), el('input',
 { className: 'ds-input', value: edManu, onChange: (e) => setEdManu(e.target.value) }), el('span',
 { className: 'ds-label' }, '型号'), el('input', { className: 'ds-input', value: edModel, onChange: (e) => setEdModel(e.target.value) })),
-            el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '分类'), el('input',
-{ className: 'ds-input', list: 'ds-cat-suggest', value: edCat, onChange: (e) => setEdCat(e.target.value),
-placeholder: '可自定义，如：声呐、推进器' }), el('span', { className: 'ds-label' }, '标签'), el('input', { className: 'ds-input',
-value: edTags, onChange: (e) => setEdTags(e.target.value), placeholder: '逗号分隔' })),
+            el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '分类'), el(CategoryInput,
+{ categories: cats, value: edCat, onChange: setEdCat, placeholder: '输入新分类，如：声呐' }), el('span', { className: 'ds-label' },
+'标签'), el('input', { className: 'ds-input', value: edTags, onChange: (e) => setEdTags(e.target.value),
+placeholder: '逗号分隔' })),
             el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '摘要'), el('textarea',
 { className: 'ds-textarea', value: edSummary, onChange: (e) => setEdSummary(e.target.value) })),
             el('div', { className: 'ds-panel-title', style: { fontSize: 14, marginTop: 10 } }, '参数表'),
@@ -464,7 +485,7 @@ manualOpen ? '收起录入' : '+ 手动录入'), el('button', { className: 'ds-b
 message: String((e && e.message) || e) })) } }, '初始化工具链')), el('div', { className: 'ds-kb-toolbar' },
 el('input', { className: 'ds-input', value: q, onChange: (e) => setQ(e.target.value), placeholder: '搜索关键词：型号、量程、精度、DVL、声纳…',
 onKeyDown: (e) => { if (e.key === 'Enter') refresh() } }), el('select', { className: 'ds-select',
-value: cat, onChange: (e) => setCat(e.target.value) }, el('option', { value: '' }, '全部分类'), CATEGORIES.map((c) => el('option',
+value: cat, onChange: (e) => setCat(e.target.value) }, el('option', { value: '' }, '全部分类'), (cats.length ? cats : CATEGORIES).map((c) => el('option',
 { key: c, value: c }, c))), el('button', { className: 'ds-btn', onClick: refresh }, '搜索'), el('span',
 { className: 'ds-muted' }, '共 ' + total + ' 条' + (compareIds.length ? ' · 已选 ' + compareIds.length : '')),
 el('button', { className: 'ds-btn', onClick: runCompare, disabled: compareIds.length < 2 || busy },
@@ -477,25 +498,25 @@ msg) : null),
 el('span', { className: 'ds-label' }, '厂家'), el('input', { className: 'ds-input', value: mManu, onChange: (e) => setMManu(e.target.value) })),
 el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '型号'), el('input', { className: 'ds-input',
 value: mModel, onChange: (e) => setMModel(e.target.value) }), el('span', { className: 'ds-label' },
-'分类'), el('input', { className: 'ds-input', list: 'ds-cat-suggest', value: mCat, onChange: (e) => setMCat(e.target.value),
-placeholder: '可自定义，如：声呐、推进器' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' },
-'标签'), el('input', { className: 'ds-input', value: mTags, onChange: (e) => setMTags(e.target.value),
-placeholder: '逗号分隔，如：ROV, 深度计' })), el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' },
-'摘要'), el('textarea', { className: 'ds-textarea', value: mSummary, onChange: (e) => setMSummary(e.target.value) })),
-el('div', { className: 'ds-panel-title', style: { fontSize: 14 } }, '参数'), (mParams.length ? el('table',
-{ className: 'ds-table', style: { marginBottom: 8 } }, el('thead', null, el('tr', null, el('th', null,
-'参数名'), el('th', null, '值'), el('th', null, '单位'), el('th', null, '说明'), el('th', null, ''))), el('tbody',
-null, mParams.map((pp, i) => el('tr', { key: i }, el('td', null, el('input', { className: 'ds-input',
-value: pp.name, onChange: (e) => setParam(mParams, setMParams, i, 'name', e.target.value) })), el('td',
-null, el('input', { className: 'ds-input', value: pp.value, onChange: (e) => setParam(mParams, setMParams,
-i, 'value', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.unit,
-onChange: (e) => setParam(mParams, setMParams, i, 'unit', e.target.value) })), el('td', null, el('input',
-{ className: 'ds-input', value: pp.desc, onChange: (e) => setParam(mParams, setMParams, i, 'desc',
-e.target.value) })), el('td', null, el('button', { className: 'ds-btn-danger', onClick: () => setMParams(mParams.filter((_,
-j) => j !== i)) }, '✕')))))) : null), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost',
-onClick: () => setMParams(mParams.concat([{ name: '', value: '', unit: '', desc: '' }])) }, '+ 加一行'),
-el('button', { className: 'ds-btn', onClick: createManual, disabled: busy }, busy ? '提交中…' : '提交录入'),
-el('button', { className: 'ds-btn-ghost', onClick: () => setManualOpen(false) }, '取消'))) : null,
+'分类'), el(CategoryInput, { categories: cats, value: mCat, onChange: setMCat, placeholder: '输入新分类，如：推进器' })),
+el('div', { className: 'ds-row' }, el('span', { className: 'ds-label' }, '标签'), el('input', { className: 'ds-input',
+value: mTags, onChange: (e) => setMTags(e.target.value), placeholder: '逗号分隔，如：ROV, 深度计' })), el('div',
+{ className: 'ds-row' }, el('span', { className: 'ds-label' }, '摘要'), el('textarea', { className: 'ds-textarea',
+value: mSummary, onChange: (e) => setMSummary(e.target.value) })), el('div', { className: 'ds-panel-title',
+style: { fontSize: 14 } }, '参数'), (mParams.length ? el('table', { className: 'ds-table', style: { marginBottom: 8 } },
+el('thead', null, el('tr', null, el('th', null, '参数名'), el('th', null, '值'), el('th', null, '单位'),
+el('th', null, '说明'), el('th', null, ''))), el('tbody', null, mParams.map((pp, i) => el('tr', { key: i },
+el('td', null, el('input', { className: 'ds-input', value: pp.name, onChange: (e) => setParam(mParams,
+setMParams, i, 'name', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.value,
+onChange: (e) => setParam(mParams, setMParams, i, 'value', e.target.value) })), el('td', null, el('input',
+{ className: 'ds-input', value: pp.unit, onChange: (e) => setParam(mParams, setMParams, i, 'unit',
+e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: pp.desc, onChange: (e) => setParam(mParams,
+setMParams, i, 'desc', e.target.value) })), el('td', null, el('button', { className: 'ds-btn-danger',
+onClick: () => setMParams(mParams.filter((_, j) => j !== i)) }, '✕')))))) : null), el('div', { className: 'ds-row' },
+el('button', { className: 'ds-btn-ghost', onClick: () => setMParams(mParams.concat([{ name: '', value: '',
+unit: '', desc: '' }])) }, '+ 加一行'), el('button', { className: 'ds-btn', onClick: createManual, disabled: busy },
+busy ? '提交中…' : '提交录入'), el('button', { className: 'ds-btn-ghost', onClick: () => setManualOpen(false) },
+'取消'))) : null,
           el('div', { className: 'ds-list' }, items.map((it) => el('div', { key: it.id, className: 'ds-item' },
 el('div', { className: 'ds-item-row' }, el('input', { type: 'checkbox', checked: compareIds.indexOf(it.id) >= 0,
 onChange: () => toggleCompare(it.id), onClick: (e) => e.stopPropagation() }), el('div', { className: 'ds-item-main',
@@ -704,6 +725,7 @@ count: s.count || 1, purpose: s.purpose || '' })))
       const [busy, setBusy] = React.useState(false); const [saving, setSaving] = React.useState(false); const [err,
 setErr] = React.useState(null); const [msg, setMsg] = React.useState(null)
       const [kbItems, setKbItems] = React.useState([])
+      const [cats, setCats] = React.useState([])
       const newParam = () => ({ name: '', value: '', unit: '', desc: '' })
       const newSensor = () => ({ itemId: '', name: '', model: '', manufacturer: '', category: '',
 count: 1, purpose: '' })
@@ -711,7 +733,7 @@ count: 1, purpose: '' })
 p, { [key]: val }) : p))
       const setSensor = (i, key, val) => setSensors(sensors.map((s, idx) => idx === i ? Object.assign({},
 s, { [key]: val }) : s))
-      React.useEffect(() => { rpc('docsuite/kb/list').then((r) => setKbItems((r && r.items) || [])).catch(() => {}) },
+      React.useEffect(() => { rpc('docsuite/kb/list').then((r) => { setKbItems((r && r.items) || []); setCats((r && r.categories) || []) }).catch(() => {}) },
 [])
       const genDraft = () => {
         setBusy(true); setErr(null); setMsg(null)
@@ -771,15 +793,15 @@ el('th', { style: { width: 90 } }, '分类'), el('th', { style: { width: 60 } },
 { key: i }, el('td', null, el('input', { className: 'ds-input', value: s.name, onChange: (e) => setSensor(i,
 'name', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: s.model, onChange: (e) => setSensor(i,
 'model', e.target.value) })), el('td', null, el('input', { className: 'ds-input', value: s.manufacturer,
-onChange: (e) => setSensor(i, 'manufacturer', e.target.value) })), el('td', null, el('input', { className: 'ds-input',
-list: 'ds-cat-suggest', value: s.category, onChange: (e) => setSensor(i, 'category', e.target.value),
-placeholder: '分类' })), el('td', null, el('input', { className: 'ds-input', type: 'number', min: 1,
-value: s.count, onChange: (e) => setSensor(i, 'count', parseInt(e.target.value, 10) || 1) })), el('td',
-null, el('input', { className: 'ds-input', value: s.purpose, onChange: (e) => setSensor(i, 'purpose',
-e.target.value), placeholder: '如：水深测量' })), el('td', null, el('button', { className: 'ds-btn-danger',
-onClick: () => setSensors(sensors.filter((_, j) => j !== i)) }, '✕')))))) : el('div', { className: 'ds-muted' },
-'暂无搭载设备，从知识库添加或自动生成初稿。'), el('div', { className: 'ds-row' }, el('button', { className: 'ds-btn-ghost',
-onClick: () => setSensors(sensors.concat([newSensor()])) }, '+ 手动添加'))),
+onChange: (e) => setSensor(i, 'manufacturer', e.target.value) })), el('td', null, el(CategoryInput,
+{ categories: cats, value: s.category, onChange: (v) => setSensor(i, 'category', v), placeholder: '分类' })),
+el('td', null, el('input', { className: 'ds-input', type: 'number', min: 1, value: s.count, onChange: (e) => setSensor(i,
+'count', parseInt(e.target.value, 10) || 1) })), el('td', null, el('input', { className: 'ds-input',
+value: s.purpose, onChange: (e) => setSensor(i, 'purpose', e.target.value), placeholder: '如：水深测量' })),
+el('td', null, el('button', { className: 'ds-btn-danger', onClick: () => setSensors(sensors.filter((_,
+j) => j !== i)) }, '✕')))))) : el('div', { className: 'ds-muted' }, '暂无搭载设备，从知识库添加或自动生成初稿。'), el('div',
+{ className: 'ds-row' }, el('button', { className: 'ds-btn-ghost', onClick: () => setSensors(sensors.concat([newSensor()])) },
+'+ 手动添加'))),
       )
     }
     // ================= 文档工坊页面（M3） =================
