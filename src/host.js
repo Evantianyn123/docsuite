@@ -380,10 +380,11 @@ return {
       if (!(await depsInstalled())) need.push('pypdf python-docx')
       if (!(await pptDepsInstalled())) need.push('python-pptx')
       if (!need.length) return { ok: true, message: '工具链就绪', installed: true }
-      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install ' + need.join(' ') + ' --disable-pip-version-check' }))
-      const installText = pickStdout(installRes) + ' ' + stderrOf(installRes)
+      // 用 --user 避免系统 site-packages 不可写；--no-cache-dir 避免 DSH 临时目录权限问题
+      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install --user --no-cache-dir ' + need.join(' ') + ' --disable-pip-version-check' }))
+      const installText = (pickStdout(installRes) + ' ' + stderrOf(installRes)).replace(/WARNING:[\s\S]*?manually\./g, '').replace(/notice[^\n]*\n?/g, '').trim()
       if ((await depsInstalled()) && (await pptDepsInstalled())) return { ok: true, message: '依赖安装完成', installed: true }
-      return { ok: false, message: '依赖安装失败：' + installText.slice(-400), installed: false }
+      return { ok: false, message: '依赖安装失败：' + (installText || installRes).slice(-600), installed: false }
     }
     async function ensureOcrToolchain() {
       if (!shell) return { ok: false, message: 'shell 服务不可用' }
@@ -391,10 +392,10 @@ return {
       await ensureDir(scriptsDir)
       try { await writeTextFile(joinPath(scriptsDir, 'ocr_file.py'), OCR_SCRIPT) } catch (e) { return { ok: false, message: '写入脚本失败' } }
       if (await ocrDepsInstalled()) return { ok: true, message: 'OCR 就绪', installed: true }
-      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install pymupdf rapidocr-onnxruntime --disable-pip-version-check' }))
-      const installText = pickStdout(installRes) + ' ' + stderrOf(installRes)
+      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install --user --no-cache-dir pymupdf rapidocr-onnxruntime --disable-pip-version-check' }))
+      const installText = (pickStdout(installRes) + ' ' + stderrOf(installRes)).replace(/WARNING:[\s\S]*?manually\./g, '').replace(/notice[^\n]*\n?/g, '').trim()
       if (await ocrDepsInstalled()) return { ok: true, message: 'OCR 依赖安装完成（首次使用较慢）', installed: true }
-      return { ok: false, message: 'OCR 依赖安装失败：' + installText.slice(-400), installed: false }
+      return { ok: false, message: 'OCR 依赖安装失败：' + (installText || installRes).slice(-600), installed: false }
     }
     async function ocrPdfFile(pdfPath, outTxtPath) {
       const tc = await ensureOcrToolchain()
