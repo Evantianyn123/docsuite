@@ -534,7 +534,7 @@ setLName] = React.useState('')
         reader.onload = () => {
           const b64 = String(reader.result).split(',')[1] || ''
           rpc('docsuite/tpl/learn', { fileName: lFile.name, base64: b64, docKind: lKind, name: lName.trim() })
-            .then((r) => { if (r && r.ok) { setMsg('🧬 学习完成：' + r.template.name + '（' + countSections(r.template.sections) + ' 个章节）'); setLearnOpen(false); setLFile(null); refresh(); setEditing(r.template) } else setErr('学习失败：' + ((r && r.message) || '未知错误')) })
+            .then((r) => { if (r && r.ok) { setMsg('🧬 学习完成：' + r.template.name + '（' + countSections(r.template.sections) + ' 个章节）'); setLearnOpen(false); setLFile(null); refresh(); setEditing(r.template) } else setErr('学习失败：' + ((r && r.message) || '未知错误') + ((r && r.rawPreview) ? '｜模型输出：' + r.rawPreview : '')) })
             .catch((e) => setErr('学习异常：' + String((e && e.message) || e))).then(() => setBusy(false))
         }
         reader.onerror = () => { setBusy(false); setErr('读取文件失败') }

@@ -410,16 +410,39 @@ return {
     // ---- LLM ----
     function parseModelJson(raw) {
       if (!raw) return null
+      const tryParse = (t) => { try { return JSON.parse(t) } catch (e) { return null } }
       let s = String(raw).trim()
-      try { return JSON.parse(s) } catch (e) {}
+      let p = tryParse(s); if (p) return p
       s = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
-      try { return JSON.parse(s) } catch (e) {}
-      const start = s.indexOf('{'); const end = s.lastIndexOf('}')
-      if (start >= 0 && end > start) {
-        let candidate = s.slice(start, end + 1)
-        try { return JSON.parse(candidate) } catch (e) {}
-        let back = candidate.lastIndexOf('}')
-        while (back > 0) { try { return JSON.parse(candidate.slice(0, back + 1)) } catch (e2) {} back = candidate.lastIndexOf('}', back - 1) }
+      p = tryParse(s); if (p) return p
+      // 平衡括号提取：定位第一个 { 并扫描到与之匹配的 }（字符串内 {} 不干扰）
+      const extractBalanced = (str, open, close) => {
+        const start = str.indexOf(open)
+        if (start < 0) return null
+        let depth = 0, inStr = false, esc = false
+        for (let i = start; i < str.length; i++) {
+          const ch = str[i]
+          if (inStr) {
+            if (esc) esc = false
+            else if (ch === '\\') esc = true
+            else if (ch === '"') inStr = false
+            continue
+          }
+          if (ch === '"') { inStr = true; continue }
+          if (ch === open) depth++
+          else if (ch === close) { depth--; if (depth === 0) return str.slice(start, i + 1) }
+        }
+        return null
+      }
+      let cand = extractBalanced(s, '{', '}')
+      if (cand) { p = tryParse(cand); if (p) return p }
+      cand = extractBalanced(s, '[', ']')
+      if (cand) { p = tryParse(cand); if (p) return p }
+      // 回退：从后往前尝试每一个 } 作为结束点（处理模型输出被截断/夹带文本）
+      const st = s.indexOf('{')
+      if (st >= 0) {
+        let back = s.lastIndexOf('}')
+        while (back > st) { p = tryParse(s.slice(st, back + 1)); if (p) return p; back = s.lastIndexOf('}', back - 1) }
       }
       return null
     }
@@ -509,10 +532,14 @@ return {
       const kindName = KIND_NAMES[args.docKind] || '技术文档'
       const system = '你是文档结构分析专家。你擅长从历史文档中归纳章节结构、层级关系和写作风格。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '请分析以下' + kindName + '文档，归纳章节结构（含层级）sections，并总结写作风格 style（语气/表格偏好/典型图表/篇幅/其他）。\n输出 JSON：{"sections": [{"title": "章节标题", "desc": "要点", "children": []}], "style": {"tone": "", "tablePreference": "", "typicalCharts": [], "lengthPerSection": "", "writingStyle": ""}}\n\n文档文本（前 30000 字符）：\n' + text.slice(0, 30000)
-      const res2 = await llmText(route, system, userPrompt, 5000)
+      const res2 = await llmText(route, system, userPrompt, 8000)
       if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
-      const parsed = parseModelJson(res2.text || res2.reasoning || '')
-      if (!parsed) return { ok: false, message: '模型输出解析失败，请重试' }
+      const effective = res2.text || res2.reasoning || ''
+      const parsed = parseModelJson(effective) || parseModelJson(res2.reasoning || '') || parseModelJson(res2.text || '')
+      if (!parsed) {
+        try { const dbgDir = joinPath(dir, 'templates', 'debug'); await ensureDir(dbgDir); await writeJson(joinPath(dbgDir, id + '.json'), { id: id, at: new Date().toISOString(), fileName: safeName, text: (res2.text || '').slice(0, 4000), reasoning: (res2.reasoning || '').slice(0, 4000) }) } catch (e) {}
+        return { ok: false, message: '模型输出解析失败，请重试', rawPreview: effective.slice(0, 400) }
+      }
       const style = parsed.style && typeof parsed.style === 'object' ? parsed.style : {}
       const tpl = {
         id: id, kind: 'learned', name: (args.name && String(args.name).trim()) || safeName.replace(/\.[^.]+$/, ''),
