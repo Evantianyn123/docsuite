@@ -1,30 +1,41 @@
-# DocSuite 一键推送脚本（Windows PowerShell）
-# 用法:  pwsh tools/push.ps1 [分支名]
-# 说明: 通过 gh CLI 的 token 一次性注入认证头推送，不修改任何全局/仓库配置文件，
-#       在受限环境（如 DSH 沙箱）也可用。日常在普通终端可先执行 `gh auth setup-git`
-#       配置持久凭据助手，之后直接 `git push`。
+# DocSuite one-click push script (Windows PowerShell)
+# Usage:  powershell -File tools/push.ps1 [branch]
+# It injects the gh CLI token as a one-shot auth header, so it works even in
+# restricted environments (e.g. the DSH sandbox) without touching git config.
+# In a normal terminal you can also run `gh auth setup-git` once, then plain
+# `git push` will work.
 param(
     [string]$Branch = 'main'
 )
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-# gh 可用性检查
+# Run git and judge success only by the exit code (git progress goes to stderr)
+function Invoke-GitPush([string[]]$GitArgs) {
+    git @GitArgs *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "git push failed (exit code $LASTEXITCODE); check network and retry"
+        exit 1
+    }
+}
+
+# gh availability
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-    Write-Error '未找到 gh CLI，请先安装 GitHub CLI 并执行 gh auth login'
+    Write-Error 'gh CLI not found. Install GitHub CLI and run gh auth login first.'
     exit 1
 }
 gh auth status *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Error 'gh 未登录，请先执行 gh auth login'
+    Write-Error 'gh not logged in. Run gh auth login first.'
     exit 1
 }
 
 $token = gh auth token
 $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$token"))
 
-# 推送分支与所有 tag（用 OpenSSL TLS 后端，规避 Windows schannel 凭据问题）
-git -c credential.helper= -c http.sslBackend=openssl -c http.extraheader="AUTHORIZATION: Basic $basic" push -u origin $Branch
-git -c credential.helper= -c http.sslBackend=openssl -c http.extraheader="AUTHORIZATION: Basic $basic" push origin --tags
+# Push branch and all tags (OpenSSL TLS backend avoids Windows schannel credential issues)
+Invoke-GitPush @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl', '-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', '-u', 'origin', $Branch)
+Invoke-GitPush @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl', '-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', 'origin', '--tags')
 
-Write-Host "`n✔ 已推送到 origin/$Branch （含 tags）"
+Write-Host ""
+Write-Host "OK: pushed to origin/$Branch (with tags)"
