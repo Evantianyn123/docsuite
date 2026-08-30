@@ -44,8 +44,10 @@ try {
 } catch { $proxyArgs = @() }
 
 # Push branch and all tags (OpenSSL TLS backend avoids Windows schannel credential issues)
-Invoke-GitPush @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl', $proxyArgs, '-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', '-u', 'origin', $Branch)
-Invoke-GitPush @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl', $proxyArgs, '-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', 'origin', '--tags')
+$common = @('-c', 'credential.helper=', '-c', 'http.sslBackend=openssl')
+if ($proxyArgs.Count -gt 0) { $common += $proxyArgs }
+Invoke-GitPush @($common + @('-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', '-u', 'origin', $Branch))
+Invoke-GitPush @($common + @('-c', "http.extraheader=AUTHORIZATION: Basic $basic", 'push', 'origin', '--tags'))
 
 Write-Host ""
 Write-Host "OK: pushed to origin/$Branch (with tags)"
