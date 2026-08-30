@@ -77,6 +77,41 @@ return {
       '',
       'def extract_pdf(path):',
       '    try:',
+      '        import pdfplumber',
+      '        body_parts = []',
+      '        table_parts = []',
+      '        with pdfplumber.open(path) as pdf:',
+      '            for pi, page in enumerate(pdf.pages):',
+      '                try:',
+      '                    txt = page.extract_text() or chr(34) + chr(34)',
+      '                    if txt:',
+      '                        body_parts.append("【第" + str(pi + 1) + "页正文】")',
+      '                        body_parts.append(txt)',
+      '                except Exception:',
+      '                    pass',
+      '                try:',
+      '                    tables = page.extract_tables()',
+      '                    for ti, tb in enumerate(tables):',
+      '                        if not tb:',
+      '                            continue',
+      '                        table_parts.append("【表格 第" + str(pi + 1) + "页 第" + str(ti + 1) + "个】")',
+      '                        for row in tb:',
+      '                            cells = []',
+      '                            for c in row:',
+      '                                if c is None:',
+      '                                    cells.append("")',
+      '                                else:',
+      '                                    cells.append(str(c).replace(chr(10), " ").strip())',
+      '                            table_parts.append("|".join(cells))',
+      '                except Exception:',
+      '                    pass',
+      '        if table_parts:',
+      '            sep = "===== 以下为表格数据（每行用 | 分隔，同一行各列表示同一型号的一组参数，第一行常为表头：型号|参数1|参数2|...） ====="',
+      '            return chr(10).join(body_parts) + chr(10) + chr(10) + sep + chr(10) + chr(10) + chr(10).join(table_parts)',
+      '        return chr(10).join(body_parts)',
+      '    except Exception:',
+      '        pass',
+      '    try:',
       '        from pypdf import PdfReader',
       '    except Exception:',
       '        from PyPDF2 import PdfReader',
@@ -366,6 +401,10 @@ return {
       if (!shell) return false
       try { const res = await shell.run(shell.resolve({ command: 'python -c "import pptx"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
     }
+    async function pdfTblDepsInstalled() {
+      if (!shell) return false
+      try { const res = await shell.run(shell.resolve({ command: 'python -c "import pdfplumber"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
+    }
     async function ocrDepsInstalled() {
       if (!shell) return false
       try { const res = await shell.run(shell.resolve({ command: 'python -c "import fitz; import rapidocr_onnxruntime"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
@@ -378,6 +417,7 @@ return {
       try { await writeTextFile(joinPath(scriptsDir, 'ingest_file.py'), PY_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'export_docx.py'), EXPORT_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'export_pptx.py'), PPT_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'ocr_file.py'), OCR_SCRIPT) } catch (e) { return { ok: false, message: '写入脚本失败：' + String((e && e.message) || e) } }
       const need = []
       if (!(await depsInstalled())) need.push('pypdf python-docx')
+      if (!(await pdfTblDepsInstalled())) need.push('pdfplumber')
       if (!(await pptDepsInstalled())) need.push('python-pptx')
       if (!need.length) return { ok: true, message: '工具链就绪', installed: true }
       // 用 --user 避免系统 site-packages 不可写；--no-cache-dir 避免 DSH 临时目录权限问题
@@ -777,18 +817,18 @@ return {
       const item = await readItem(id); if (!item) return { ok: false, message: '条目不存在' }
       const dir = await dataDir(); const srcId = item.sourceDir || id
       let text = ''
-      try { const t = await fs.resolve(joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')); const info = await fs.stat(t); if (info) text = (await fs.readText(t)).slice(0, 12000) } catch (e) { text = '' }
+      try { const t = await fs.resolve(joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')); const info = await fs.stat(t); if (info) text = (await fs.readText(t)).slice(0, 50000) } catch (e) { text = '' }
       if (!text) return { ok: false, message: '该条目无可抽取的文本' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是水下机器人（ROV/AUV）领域的资深技术文档分析助手。你擅长识别不同型号并提取结构化技术参数、撰写精炼摘要。你的回答必须只包含一个 JSON 对象。'
-      const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本：\n' + text
-      const res = await llmText(route, system, userPrompt, 6000)
+      const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n【重要】文档中可能包含「表格数据」：表格用 | 分隔每行的各列，同一行各列表示【同一个型号】的一组参数（第一行常为表头，如：型号|参数1|参数2|...）。请严格按表格的行列对应关系识别每个型号及其参数，确保参数归属到正确的型号，不要张冠李戴；正文中提及的参数也要并入对应型号。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本（含表格，| 分隔每行各列）：\n' + text
+      const res = await llmText(route, system, userPrompt, 9000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const effective = res.text || res.reasoning || ''
       let parsed = parseModelJson(effective)
       if (!parsed) {
         // 自动重试一次：模型可能只输出思考/夹带文字而未输出 JSON，带纠错提示重新调用
-        const retryPrompt = '你上次的回答没有包含有效的 JSON，无法解析。请重新回答并严格遵守：只输出一个 JSON 对象，不要输出任何解释、思考过程、Markdown 代码块或其他文字。\n\n设备名称：' + (item.name || '') + '\n\n你上次的回答：\n' + effective.slice(0, 3000) + '\n\n请只输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}'
+        const retryPrompt = '你上次的回答没有包含有效的 JSON，无法解析。请重新回答并严格遵守：只输出一个 JSON 对象，不要输出任何解释、思考过程、Markdown 代码块或其他文字。注意按表格（| 分隔）的行列对应关系确保参数归属正确型号。\n\n设备名称：' + (item.name || '') + '\n\n你上次的回答：\n' + effective.slice(0, 3000) + '\n\n请只输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}'
         const res2 = await llmText(route, system, retryPrompt, 6000)
         if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
         const effective2 = res2.text || res2.reasoning || ''
