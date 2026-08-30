@@ -867,11 +867,21 @@ message: 'LLM 服务不可用' }
       const res = await llmText(route, system, userPrompt, 6000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const effective = res.text || res.reasoning || ''
-      const parsed = parseModelJson(effective)
-      if (!parsed) { try { const dbgDir = joinPath(dir, 'kb', 'enrich-debug'); await ensureDir(dbgDir); await writeJson(joinPath(dbgDir,
-id + '.json'), { id: id, at: new Date().toISOString(), text: res.text.slice(0, 2000), reasoning: (res.reasoning || '').slice(0,
-2000) }) } catch (e) {} return { ok: false, message: '模型输出解析失败，请重试', rawPreview: effective.slice(0,
+      let parsed = parseModelJson(effective)
+      if (!parsed) {
+        // 自动重试一次：模型可能只输出思考/夹带文字而未输出 JSON，带纠错提示重新调用
+        const retryPrompt = '你上次的回答没有包含有效的 JSON，无法解析。请重新回答并严格遵守：只输出一个 JSON 对象，不要输出任何解释、思考过程、Markdown 代码块或其他文字。\n\n设备名称：' + (item.name || '') + '\n\n你上次的回答：\n' + effective.slice(0,
+3000) + '\n\n请只输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}'
+        const res2 = await llmText(route, system, retryPrompt, 6000)
+        if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
+        const effective2 = res2.text || res2.reasoning || ''
+        parsed = parseModelJson(effective2)
+        if (!parsed) { try { const dbgDir = joinPath(dir, 'kb', 'enrich-debug'); await ensureDir(dbgDir); await writeJson(joinPath(dbgDir,
+id + '.json'), { id: id, at: new Date().toISOString(), attempt1: { text: res.text.slice(0, 2000),
+reasoning: (res.reasoning || '').slice(0, 2000) }, attempt2: { text: res2.text.slice(0, 2000), reasoning: (res2.reasoning || '').slice(0,
+2000) } }) } catch (e) {} return { ok: false, message: '模型输出解析失败（已自动重试一次），请再次点击重试', rawPreview: effective2.slice(0,
 300) } }
+      }
       let models = Array.isArray(parsed.models) ? parsed.models : []
       if (!models.length) models = [{ model: parsed.model || '', name: parsed.name || '', category: parsed.category || '',
 params: parsed.params || [], summary: parsed.summary || '' }]
