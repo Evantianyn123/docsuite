@@ -58,6 +58,49 @@ customApi: { baseUrl: '', apiKey: '', model: '' } }, scanDirs: [] }
       if (!fs) return
       const target = await fs.resolve(absPath); await fs.writeText(target, content)
     }
+    // 容错读取文本：fs.readText 会把含 NUL 字节的文件判定为二进制拒绝读取（FS_NOT_TEXT），
+    // 而 PDF 提取产物常带 NUL/控制字符。此函数优先 readText，失败则 readBytes 原始字节，
+    // 手工做 UTF-8 容错解码，并过滤 NUL 与控制字符（保留 \n \t \r）。
+    function decodeBytesTolerant(bytes) {
+      let out = ''
+      let i = 0
+      const n = bytes ? bytes.length : 0
+      while (i < n) {
+        const b = bytes[i]
+        if (b === 0) { i++; continue }
+        if (b < 0x80) { out += String.fromCharCode(b); i++; continue }
+        let len = 0, cp = 0
+        if (b >= 0xF0) { len = 4; cp = b & 0x07 }
+        else if (b >= 0xE0) { len = 3; cp = b & 0x0F }
+        else if (b >= 0xC0) { len = 2; cp = b & 0x1F }
+        else { i++; continue }
+        if (i + len > n) break
+        let ok = true
+        for (let j = 1; j < len; j++) {
+          const c = bytes[i + j]
+          if ((c & 0xC0) !== 0x80) { ok = false; break }
+          cp = (cp << 6) | (c & 0x3F)
+        }
+        if (!ok) { i++; continue }
+        out += String.fromCodePoint(cp)
+        i += len
+      }
+      let res = ''
+      for (let k = 0; k < out.length; k++) {
+        const code = out.charCodeAt(k)
+        if (code === 9 || code === 10 || code === 13 || code >= 32) res += out[k]
+      }
+      return res
+    }
+    async function readTextTolerant(absPath) {
+      if (!fs) return ''
+      try {
+        const target = await fs.resolve(absPath); const info = await fs.stat(target); if (!info) return ''
+        try { return await fs.readText(target) } catch (e) {}
+        const bytes = await fs.readBytes(target, undefined, 64 * 1024 * 1024)
+        return decodeBytesTolerant(bytes)
+      } catch (e) { return '' }
+    }
     async function writeJson(absPath, obj) { await writeTextFile(absPath, JSON.stringify(obj, null,
 2)) }
     async function getConfig() { const cfg = await readJson(CONFIG_PATH); return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : DEFAULT_CONFIG }
@@ -171,6 +214,7 @@ next); return next
       '    else:',
       '        text = extract_txt(orig_path)',
       '    text_path = os.path.join(out_dir, chr(101)+chr(120)+chr(116)+chr(114)+chr(97)+chr(99)+chr(116)+chr(101)+chr(100)+chr(46)+chr(116)+chr(120)+chr(116))',
+      '    text = "".join(ch for ch in text if ch in (chr(10), chr(9), chr(13)) or ord(ch) >= 32)',
       '    with open(text_path, chr(119), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)) as f:',
       '        f.write(text)',
       '    print(json.dumps({chr(111)+chr(107): True, chr(102)+chr(105)+chr(108)+chr(101): orig_path, chr(116)+chr(101)+chr(120)+chr(116)+chr(76)+chr(101)+chr(110): len(text)}))',
@@ -388,8 +432,9 @@ next); return next
       '            os.remove(tmp)',
       '        except Exception:',
       '            pass',
+      '    text = "".join(ch for ch in chr(10).join(parts) if ch in (chr(10), chr(9), chr(13)) or ord(ch) >= 32)',
       '    with open(out_path, chr(119), encoding=chr(117)+chr(116)+chr(102)+chr(45)+chr(56)) as f:',
-      '        f.write(chr(10).join(parts))',
+      '        f.write(text)',
       '    print(chr(79)+chr(67)+chr(82)+chr(95)+chr(68)+chr(79)+chr(78)+chr(69))',
       '',
       'main()',
@@ -590,7 +635,7 @@ sub, id + '.json')); if (item) return item }
       const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir,
 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text) return { ok: false, message: '文本抽取失败：' + pickStdout(res).slice(0, 300) }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const kindName = KIND_NAMES[args.docKind] || '技术文档'
@@ -683,7 +728,7 @@ lengthPerSection: String(st.lengthPerSection || '').slice(0, 200), writingStyle:
           if (!id || id.indexOf('kb_') !== 0) continue
           const existing = await readItem(id); if (existing) continue
           let textLen = 0
-          try { const t = await fs.resolve(joinPath(sourcesDir, id, 'extracted.txt')); const st = await fs.stat(t); if (st) textLen = (await fs.readText(t)).length } catch (e2) { textLen = 0 }
+          try { const t = await fs.resolve(joinPath(sourcesDir, id, 'extracted.txt')); const st = await fs.stat(t); if (st) textLen = (await readTextTolerant(t)).length } catch (e2) { textLen = 0 }
           let fileName = ''
           try {
             const fTarget = await fs.resolve(joinPath(sourcesDir, id)); const fEntries = await fs.listDir(fTarget)
@@ -741,7 +786,8 @@ m) } m.set(item.id, (m.get(item.id) || 0) + w) }
         }
         let body = ''
         try { const t = await fs.resolve(joinPath(dir, 'kb', 'sources', item.sourceDir || item.id,
-'extracted.txt')); const st = await fs.stat(t); if (st) body = (await fs.readText(t)).slice(0, 20000) } catch (e) { body = '' }
+'extracted.txt')); const st = await fs.stat(t); if (st) body = (await readTextTolerant(t)).slice(0,
+20000) } catch (e) { body = '' }
         for (const tok of tokenize(body)) { let m = terms.get(tok); if (!m) { m = new Map(); terms.set(tok,
 m) } m.set(item.id, (m.get(item.id) || 0) + 1) }
       }
@@ -785,7 +831,7 @@ arr) }
       for (let i = lines.length - 1; i >= 0; i--) { const line = lines[i].trim(); if (line.charAt(0) === '{') { try { parsed = JSON.parse(line); break } catch (e) {} } }
       if (!parsed || !parsed.ok) {
         let textLen = 0
-        try { const t = await fs.resolve(joinPath(outdir, 'extracted.txt')); const st = await fs.stat(t); if (st) textLen = (await fs.readText(t)).length } catch (e) { textLen = 0 }
+        try { const t = await fs.resolve(joinPath(outdir, 'extracted.txt')); const st = await fs.stat(t); if (st) textLen = (await readTextTolerant(t)).length } catch (e) { textLen = 0 }
         if (textLen > 0) parsed = { ok: true, textLen: textLen }
         else return { ok: false, message: '文本解析失败：' + out.slice(0, 500) + (stderrOf(res) ? ' | 错误：' + stderrOf(res).slice(0,
 300) : '') }
@@ -798,7 +844,7 @@ arr) }
         const ocrR = await ocrPdfFile(pdfPath, ocrOut)
         if (ocrR.ok) {
           let ocrLen = 0
-          try { const t = await fs.resolve(ocrOut); const st = await fs.stat(t); if (st) ocrLen = (await fs.readText(t)).length } catch (e) { ocrLen = 0 }
+          try { const t = await fs.resolve(ocrOut); const st = await fs.stat(t); if (st) ocrLen = (await readTextTolerant(t)).length } catch (e) { ocrLen = 0 }
           if (ocrLen > 30) { parsed.textLen = ocrLen; ocrDone = true }
         }
       }
@@ -827,7 +873,7 @@ fn); break } }
       const r = await ocrPdfFile(pdfPath, ocrOut)
       if (!r.ok) return r
       let ocrLen = 0
-      try { const t = await fs.resolve(ocrOut); const st = await fs.stat(t); if (st) ocrLen = (await fs.readText(t)).length } catch (e) { ocrLen = 0 }
+      try { const t = await fs.resolve(ocrOut); const st = await fs.stat(t); if (st) ocrLen = (await readTextTolerant(t)).length } catch (e) { ocrLen = 0 }
       item.textLen = ocrLen; item.ocr = true; item.updatedAt = new Date().toISOString()
       await writeItem(item); markDirty()
       return { ok: true, item: slim(item) }
@@ -889,8 +935,8 @@ message: '源文件不存在' }
       const item = await readItem(args && args.id); const srcId = (item && item.sourceDir) || (args && args.id)
       const p = joinPath(await dataDir(), 'kb', 'sources', srcId, 'extracted.txt')
       try { const t = await fs.resolve(p); const info = await fs.stat(t); if (!info) return { ok: true,
-text: '', total: 0 }; const text = await fs.readText(t); return { ok: true, text: text.slice(0, 3000),
-total: text.length } } catch (e) { return { ok: true, text: '', total: 0 } }
+text: '', total: 0 }; const text = await readTextTolerant(t); return { ok: true, text: text.slice(0,
+3000), total: text.length } } catch (e) { return { ok: true, text: '', total: 0 } }
     }
     async function enrichItem(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }; if (!llm) return { ok: false,
@@ -899,7 +945,7 @@ message: 'LLM 服务不可用' }
       const dir = await dataDir(); const srcId = item.sourceDir || id
       const textPath = joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')
       let text = ''; let readErr = ''
-      try { const t = await fs.resolve(textPath); const info = await fs.stat(t); if (info) text = (await fs.readText(t)).slice(0,
+      try { const t = await fs.resolve(textPath); const info = await fs.stat(t); if (info) text = (await readTextTolerant(t)).slice(0,
 50000) } catch (e) { readErr = String((e && e.message) || e) }
       if (!text) return { ok: false, message: '该条目无可抽取的文本（目录:' + dir + '；路径:' + textPath + (readErr ? '；错误:' + readErr : '；文件存在但内容为空') + '）' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
@@ -1134,12 +1180,12 @@ sections: [] },
       const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir,
 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
         const pdfPath = joinPath(tmpDir, safeName)
         if (/^.*\.pdf$/i.test(safeName)) {
           const ocrR = await ocrPdfFile(pdfPath, joinPath(tmpDir, 'extracted.txt'))
-          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' } }
+          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
         }
       }
       if (!text) return { ok: false, message: '文档解析失败：' + pickStdout(res).slice(0, 300) }
@@ -1424,13 +1470,13 @@ message: '导出文件不存在' }
       const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir,
 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
         // 扫描件招标文件：OCR
         const pdfPath = joinPath(tmpDir, safeName)
         if (/^.*\.pdf$/i.test(safeName)) {
           const ocrR = await ocrPdfFile(pdfPath, joinPath(tmpDir, 'extracted.txt'))
-          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await fs.readText(t) } catch (e) { text = '' } }
+          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
         }
       }
       if (!text) return { ok: false, message: '招标文件解析失败：' + pickStdout(res).slice(0, 300) }
