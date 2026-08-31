@@ -712,8 +712,25 @@ return {
 
     function DocSuiteApp() {
       const [page, setPage] = React.useState('home'); const [sum, setSum] = React.useState(null); const [err, setErr] = React.useState(null)
-      // S3: summary 返回 {ok:false}（如 DATA_DIR_UNAVAILABLE）时显示具体错误而非空统计
-      React.useEffect(() => { rpc('docsuite/state/summary').then((r) => { if (r && r.ok) setSum(r); else setErr((r && r.message) || '加载失败') }).catch((e) => setErr(String((e && e.message) || e))) }, [])
+      // S3: summary 返回 {ok:false}（如 DATA_DIR_UNAVAILABLE）时显示具体错误而非空统计；
+      // DSH 重启后 ~20s 暖机窗口内首请求可能失败，自动重试 3 次（间隔 3s）再报错
+      React.useEffect(() => {
+        let cancelled = false
+        const attempt = (n) => {
+          rpc('docsuite/state/summary').then((r) => {
+            if (cancelled) return
+            if (r && r.ok) setSum(r)
+            else if (n < 3) setTimeout(() => attempt(n + 1), 3000)
+            else setErr((r && r.message) || '加载失败')
+          }).catch((e) => {
+            if (cancelled) return
+            if (n < 3) setTimeout(() => attempt(n + 1), 3000)
+            else setErr(String((e && e.message) || e))
+          })
+        }
+        attempt(0)
+        return () => { cancelled = true }
+      }, [])
       let body = null
       if (page === 'settings') body = el(SettingsContent, null)
       else if (page === 'home') body = el(Home, { sum: sum, onOpen: (k) => setPage(k) })
