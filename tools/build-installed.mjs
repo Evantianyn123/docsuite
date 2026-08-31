@@ -36,15 +36,75 @@ hostBody = hostBody.replace(/    const register = \(method, handler\) => \{\n   
 // 骨架（含 Node 兼容层）
 const HOST_PRELUDE = `// DocSuite 文档工坊 — 安装式 link 插件（host）
 // 由 build.mjs 从 src/host.js 机械生成；改业务逻辑请改 src/host.js 后重新 build。
-import { readFile, writeFile, readdir, stat as fsStat, mkdir as fsMkdir, rm as fsRm, cp as fsCp, rename as fsRename } from 'node:fs/promises'
+import { readFile, writeFile, readdir, stat as fsStat, mkdir as fsMkdir, rm as fsRm, cp as fsCp, rename as fsRename, lstat as fsLstat, realpath as fsRealpath, access as fsAccess } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { exec, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { join } from 'node:path'
+import { join, resolve, relative, isAbsolute, dirname, basename, extname, sep } from 'node:path'
 import os from 'node:os'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
+
+// ---- F2 路径安全层（v5 设计）----
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const ALLOWED_UPLOAD_EXTS = ['.pdf', '.docx', '.txt', '.md', '.pptx']
+function normalizeWin(...parts) { return resolve(...parts.map(String)) }
+function safeJoin(root, ...parts) {
+  const rootNorm = normalizeWin(root)
+  const resolved = normalizeWin(rootNorm, ...parts)
+  const rel = relative(rootNorm, resolved)
+  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
+    const e = new Error('路径越界: ' + resolved); e.code = 'PATH_OUTSIDE_ROOT'; throw e
+  }
+  return resolved
+}
+// 链接/联接防护（只检查已存在的祖先层，含缓存）
+const verifiedPaths = new Set()
+async function assertNoLinkCached(root, target) {
+  let cursor = target
+  while (true) {
+    try { await fsAccess(cursor); break } catch (e) {
+      if (e.code === 'ENOENT') { const p = dirname(cursor); if (p === cursor) break; cursor = p }
+      else throw e   // 非 ENOENT（权限等）失败关闭
+    }
+  }
+  let cur = cursor
+  const chain = []
+  while (cur.length >= root.length) { chain.unshift(cur); if (cur === root) break; cur = dirname(cur) }
+  for (const p of chain) {
+    if (verifiedPaths.has(p)) continue
+    const st = await fsLstat(p)
+    if (st.isSymbolicLink()) { const e = new Error('路径含符号链接: ' + p); e.code = 'PATH_SYMLINK'; throw e }
+    const real = await fsRealpath(p)
+    if (normalizeWin(real).toLowerCase() !== normalizeWin(p).toLowerCase()) {
+      const e = new Error('路径含目录联接/重解析点: ' + p); e.code = 'PATH_LINK'; throw e
+    }
+    verifiedPaths.add(p)
+  }
+}
+const ID_RE = /^[a-zA-Z0-9_-]{1,64}$/
+function validateId(id, label) {
+  if (typeof id !== 'string' || !ID_RE.test(id)) {
+    const e = new Error((label || 'ID') + ' 格式非法'); e.code = 'INVALID_ID'; throw e
+  }
+  return id
+}
+function sanitizeFileName(name, allowed) {
+  const exts = allowed || ALLOWED_UPLOAD_EXTS
+  let base = basename(String(name || '').replace(/[\u0000-\u001f]/g, ''))
+  base = base.replace(/\s+$/g, '').replace(/\.+$/g, '')
+  if (!base || base === '.' || base === '..') { const e = new Error('文件名非法'); e.code = 'BAD_FILE_NAME'; throw e }
+  if (base.includes(':')) { const e = new Error('文件名含非法字符(:)'); e.code = 'BAD_FILE_NAME'; throw e }
+  const stem = base.replace(/\.[^.]+$/, '')
+  if (WINDOWS_RESERVED_RE.test(stem)) { const e = new Error('Windows 保留文件名'); e.code = 'BAD_FILE_NAME'; throw e }
+  const ext = extname(base).toLowerCase()
+  if (!exts.includes(ext)) { const e = new Error('不支持的文件类型: ' + (ext || '(无扩展名)')); e.code = 'BAD_FILE_TYPE'; throw e }
+  if (base.length > 255) { const e = new Error('文件名过长'); e.code = 'BAD_FILE_NAME'; throw e }
+  return base
+}
+// 业务失败（200）与请求错误（4xx）的边界：S2 起把输入类错误映射为 400（F4 将扩展完整错误码表）
+const BAD_REQUEST_CODES = new Set(['INVALID_ID', 'PATH_OUTSIDE_ROOT', 'PATH_SYMLINK', 'PATH_LINK', 'BAD_FILE_TYPE', 'BAD_FILE_NAME', 'BAD_ARGS'])
 
 // ---- Node 原生兼容层（替代 DSH 的 ctx.get('fs'|'shell'|'subprocess'|'web')）----
 const fsLocal = {
@@ -228,9 +288,10 @@ export function apply(ctx) {
       res.setHeader('Cache-Control', 'no-store')
       res.end(JSON.stringify(result === undefined ? { ok: true } : result))
     } catch (e) {
-      res.statusCode = 500
+      const code = (e && e.code) || 'INTERNAL'
+      res.statusCode = BAD_REQUEST_CODES.has(code) ? 400 : 500
       res.setHeader('Content-Type', 'application/json; charset=utf-8')
-      res.end(JSON.stringify({ ok: false, message: String((e && e.message) || e) }))
+      res.end(JSON.stringify({ ok: false, code: code, message: String((e && e.message) || e) }))
     }
   }
   let disposeRouteFn = null

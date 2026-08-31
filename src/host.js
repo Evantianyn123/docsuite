@@ -103,12 +103,43 @@ return {
     }
     async function writeJson(absPath, obj) { await writeTextFile(absPath, JSON.stringify(obj, null, 2)) }
     async function getConfig() { const cfg = await readJson(CONFIG_PATH); return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : DEFAULT_CONFIG }
+    // F2 v5: config/set 字段白名单 + 深层校验；禁止通过通用配置修改 dataDir/version
     async function saveConfig(patch) {
-      const cur = await getConfig(); const clean = {}
-      for (const k in (patch || {})) { const v = patch[k]; if (v !== undefined) clean[k] = v }
+      const cur = await getConfig(); const clean = {}; const p = patch || {}
+      const bad = (msg) => { const e = new Error(msg); e.code = 'BAD_ARGS'; throw e }
+      if (p.language !== undefined) { if (typeof p.language !== 'string' || (p.language !== 'zh' && p.language !== 'en')) bad('language 仅支持 zh/en'); clean.language = p.language }
+      if (p.pptTheme !== undefined) { if (typeof p.pptTheme !== 'string' || !PPT_THEME_KEYS.includes(p.pptTheme)) bad('pptTheme 非法'); clean.pptTheme = p.pptTheme }
+      if (p.model !== undefined) {
+        const m = p.model
+        if (m === null || typeof m !== 'object' || Array.isArray(m)) bad('model 必须是对象')
+        const nm = {}
+        if (m.mode !== undefined) { if (m.mode !== 'dsh' && m.mode !== 'custom') bad('model.mode 仅支持 dsh/custom'); nm.mode = m.mode }
+        if (m.provider !== undefined) { if (typeof m.provider !== 'string' || m.provider.length > 120) bad('model.provider 非法'); nm.provider = m.provider }
+        if (m.model !== undefined) { if (typeof m.model !== 'string' || m.model.length > 120) bad('model.model 非法'); nm.model = m.model }
+        clean.model = Object.assign({}, cur.model || {}, nm)
+      }
+      if (p.scanDirs !== undefined) {
+        if (!Array.isArray(p.scanDirs)) bad('scanDirs 必须是数组')
+        const out = []
+        for (const sd of p.scanDirs) {
+          if (typeof sd !== 'string' || !sd.trim()) continue
+          const norm = safeJoin(workspaceRoot, sd)   // 授权读取根 = workspaceRoot（只读语义）
+          try { const st = await fs.stat(norm); if (!st || st.type !== 'directory') bad('scanDir 不存在或不是目录: ' + sd) } catch (e) { if (e.code === 'BAD_ARGS') throw e; bad('scanDir 不可访问: ' + sd) }
+          out.push(norm)
+        }
+        clean.scanDirs = out
+      }
+      for (const k of ['dataDir', 'version']) { if (p[k] !== undefined) bad('禁止通过通用配置修改 ' + k) }
       const next = Object.assign({}, cur, clean); await ensureDir(rootDir); await writeJson(CONFIG_PATH, next); return next
     }
     async function dataDir() { const cfg = await getConfig(); return (cfg.dataDir && String(cfg.dataDir)) || rootDir }
+    // F2: 统一数据路径入口（safeJoin 边界校验 + 符号链接/联接检查，带缓存）
+    async function dataPath(...parts) {
+      const root = await dataDir()
+      const p = safeJoin(root, ...parts)
+      await assertNoLinkCached(root, p)
+      return p
+    }
     async function countJsonFiles(dir) {
       if (!fs) return 0
       try {
@@ -588,19 +619,20 @@ return {
     }
     async function findTemplate(id) {
       if (!id) return null
-      const dir = await dataDir()
-      for (const sub of ['learned', 'manual']) { const item = await readJson(joinPath(dir, 'templates', sub, id + '.json')); if (item) return item }
+      validateId(id, '模板ID')
+      for (const sub of ['learned', 'manual']) { const item = await readJson(await dataPath('templates', sub, id + '.json')); if (item) return item }
       return null
     }
     async function writeTemplate(tpl) {
+      validateId(tpl.id, '模板ID')
       const sub = tpl.kind === 'manual' ? 'manual' : 'learned'
-      const dir = joinPath(await dataDir(), 'templates', sub)
-      await ensureDir(dir); await writeJson(joinPath(dir, tpl.id + '.json'), tpl)
+      const dir = await dataPath('templates', sub)
+      await ensureDir(dir); await writeJson(await dataPath('templates', sub, tpl.id + '.json'), tpl)
     }
     async function listTemplates() {
-      const dir = await dataDir(); const out = []
+      const out = []
       for (const sub of ['learned', 'manual']) {
-        const d = joinPath(dir, 'templates', sub)
+        const d = await dataPath('templates', sub)
         try {
           const target = await fs.resolve(d); const info = await fs.stat(target); if (!info) continue
           const entries = await fs.listDir(target)
@@ -618,14 +650,14 @@ return {
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少文件' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
       if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
-      const dir = await dataDir(); const id = 'tpl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-      const tmpDir = joinPath(dir, 'templates', 'tmp', id)
-      await ensureDir(tmpDir); await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
-      const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py')
-      const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
+      const id = 'tpl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      const tmpDir = await dataPath('templates', 'tmp', id)
+      await ensureDir(tmpDir); await writeTextFile(await dataPath('templates', 'tmp', id, 'upload.b64'), String(args.base64))
+      const scriptPath = await dataPath('scripts', 'ingest_file.py')
+      const safeName = sanitizeFileName(args.fileName)
+      const res = await shell.runFile(await pythonExe(), [scriptPath, await dataPath('templates', 'tmp', id, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(await dataPath('templates', 'tmp', id, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text) return { ok: false, message: '文本抽取失败：' + pickStdout(res).slice(0, 300) }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const kindName = KIND_NAMES[args.docKind] || '技术文档'
@@ -636,7 +668,7 @@ return {
       const effective = res2.text || res2.reasoning || ''
       const parsed = parseModelJson(effective) || parseModelJson(res2.reasoning || '') || parseModelJson(res2.text || '')
       if (!parsed) {
-        try { const dbgDir = joinPath(dir, 'templates', 'debug'); await ensureDir(dbgDir); await writeJson(joinPath(dbgDir, id + '.json'), { id: id, at: new Date().toISOString(), fileName: safeName, text: (res2.text || '').slice(0, 4000), reasoning: (res2.reasoning || '').slice(0, 4000) }) } catch (e) {}
+        try { const dbgDir = await dataPath('templates', 'debug'); await ensureDir(dbgDir); await writeJson(await dataPath('templates', 'debug', id + '.json'), { id: id, at: new Date().toISOString(), fileName: safeName, text: (res2.text || '').slice(0, 4000), reasoning: (res2.reasoning || '').slice(0, 4000) }) } catch (e) {}
         return { ok: false, message: '模型输出解析失败，请重试', rawPreview: effective.slice(0, 400) }
       }
       const style = parsed.style && typeof parsed.style === 'object' ? parsed.style : {}
@@ -670,9 +702,9 @@ return {
     }
     async function deleteTemplate(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }
-      const dir = await dataDir()
+      validateId(id, '模板ID')
       for (const sub of ['learned', 'manual']) {
-        const p = joinPath(dir, 'templates', sub, id + '.json')
+        const p = await dataPath('templates', sub, id + '.json')
         try { await fs.rm(p) } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
       }
       return { ok: true }
@@ -688,8 +720,8 @@ return {
       for (let i = 0; i < cleaned.length; i++) { out.push(cleaned.charAt(i)); if (i + 1 < cleaned.length) out.push(cleaned.substr(i, 2)) }
       return out
     }
-    async function readItem(id) { return readJson(joinPath(await dataDir(), 'kb', 'items', id + '.json')) }
-    async function writeItem(item) { await ensureDir(joinPath(await dataDir(), 'kb', 'items')); await writeJson(joinPath(await dataDir(), 'kb', 'items', item.id + '.json'), item) }
+    async function readItem(id) { validateId(id, '条目ID'); return readJson(await dataPath('kb', 'items', id + '.json')) }
+    async function writeItem(item) { validateId(item.id, '条目ID'); await ensureDir(await dataPath('kb', 'items')); await writeJson(await dataPath('kb', 'items', item.id + '.json'), item) }
     async function reconcileOrphans() {
       if (!fs) return
       const dir = await dataDir(); const sourcesDir = joinPath(dir, 'kb', 'sources')
@@ -776,11 +808,12 @@ return {
     async function uploadItem(args) {
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少文件或内容' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
-      const dir = await dataDir(); const id = 'kb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-      const outdir = joinPath(dir, 'kb', 'sources', id)
-      await ensureDir(outdir); await writeTextFile(joinPath(outdir, 'upload.b64'), String(args.base64))
-      const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py'); const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(outdir, 'upload.b64'), outdir, safeName], { timeoutMs: 5 * 60 * 1000 })
+      const id = 'kb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      const safeName = sanitizeFileName(args.fileName)
+      const outdir = await dataPath('kb', 'sources', id)
+      await ensureDir(outdir); await writeTextFile(await dataPath('kb', 'sources', id, 'upload.b64'), String(args.base64))
+      const scriptPath = await dataPath('scripts', 'ingest_file.py')
+      const res = await shell.runFile(await pythonExe(), [scriptPath, await dataPath('kb', 'sources', id, 'upload.b64'), outdir, safeName], { timeoutMs: 5 * 60 * 1000 })
       const out = pickStdout(res); let parsed = null
       const lines = out.split('\n')
       for (let i = lines.length - 1; i >= 0; i--) { const line = lines[i].trim(); if (line.charAt(0) === '{') { try { parsed = JSON.parse(line); break } catch (e) {} } }
@@ -810,14 +843,14 @@ return {
     }
     async function reOcrItem(args) {
       const id = args && args.id; const item = await readItem(id); if (!item) return { ok: false, message: '条目不存在' }
-      const srcId = item.sourceDir || id; const dir = await dataDir(); const sDir = joinPath(dir, 'kb', 'sources', srcId)
+      const srcId = item.sourceDir || id; const sDir = await dataPath('kb', 'sources', srcId)
       let pdfPath = ''
       try {
         const entries = await fs.listDir(await fs.resolve(sDir))
-        for (const e of entries) { const fn = e.name || String(e.path || e.target || '').split(/[\\/]/).pop(); if (/\.pdf$/i.test(fn)) { pdfPath = joinPath(sDir, fn); break } }
+        for (const e of entries) { const fn = e.name || String(e.path || e.target || '').split(/[\\/]/).pop(); if (/\.pdf$/i.test(fn)) { pdfPath = await dataPath('kb', 'sources', srcId, fn); break } }
       } catch (e) {}
       if (!pdfPath) return { ok: false, message: '未找到源 PDF 文件' }
-      const ocrOut = joinPath(sDir, 'extracted.txt')
+      const ocrOut = await dataPath('kb', 'sources', srcId, 'extracted.txt')
       const r = await ocrPdfFile(pdfPath, ocrOut)
       if (!r.ok) return r
       let ocrLen = 0
@@ -842,7 +875,8 @@ return {
     }
     async function deleteItem(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }
-      const dir = await dataDir(); const jsonPath = joinPath(dir, 'kb', 'items', id + '.json'); const srcDir = joinPath(dir, 'kb', 'sources', id)
+      validateId(id, '条目ID')
+      const jsonPath = await dataPath('kb', 'items', id + '.json'); const srcDir = await dataPath('kb', 'sources', id)
       try { await fs.rm(jsonPath); await fs.rm(srcDir) } catch (e) { try { const t = await fs.resolve(jsonPath); await fs.writeText(t, '') } catch (e2) {} }
       markDirty(); return { ok: true }
     }
@@ -858,7 +892,8 @@ return {
     }
     async function sourceItem(args) {
       const item = await readItem(args && args.id); if (!item || !item.sourceFiles || !item.sourceFiles.length) return { ok: false, message: '该条目无源文件' }
-      const file = item.sourceFiles[0]; const p = joinPath(await dataDir(), 'kb', 'sources', item.sourceDir || item.id, file)
+      const file = item.sourceFiles[0]
+      const p = await dataPath('kb', 'sources', item.sourceDir || item.id, sanitizeFileName(file, ['.pdf', '.docx', '.txt', '.md', '.pptx']))
       try {
         const t = await fs.resolve(p); const info = await fs.stat(t); if (!info) return { ok: false, message: '源文件不存在' }
         const bytes = await fs.readBytes(t, undefined, 100 * 1024 * 1024); let bin = ''
@@ -868,17 +903,18 @@ return {
     }
     async function previewItem(args) {
       const item = await readItem(args && args.id); const srcId = (item && item.sourceDir) || (args && args.id)
-      const p = joinPath(await dataDir(), 'kb', 'sources', srcId, 'extracted.txt')
+      validateId(srcId, '条目ID')
+      const p = await dataPath('kb', 'sources', srcId, 'extracted.txt')
       try { const t = await fs.resolve(p); const info = await fs.stat(t); if (!info) return { ok: true, text: '', total: 0 }; const text = await readTextTolerant(t); return { ok: true, text: text.slice(0, 3000), total: text.length } } catch (e) { return { ok: true, text: '', total: 0 } }
     }
     async function enrichItem(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }; if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const item = await readItem(id); if (!item) return { ok: false, message: '条目不存在' }
-      const dir = await dataDir(); const srcId = item.sourceDir || id
-      const textPath = joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')
+      const srcId = item.sourceDir || id
+      const textPath = await dataPath('kb', 'sources', srcId, 'extracted.txt')
       let text = ''; let readErr = ''
       try { const t = await fs.resolve(textPath); const info = await fs.stat(t); if (info) text = (await readTextTolerant(t)).slice(0, 50000) } catch (e) { readErr = String((e && e.message) || e) }
-      if (!text) return { ok: false, message: '该条目无可抽取的文本（目录:' + dir + '；路径:' + textPath + (readErr ? '；错误:' + readErr : '；文件存在但内容为空') + '）' }
+      if (!text) return { ok: false, message: '该条目无可抽取的文本（路径:' + textPath + (readErr ? '；错误:' + readErr : '；文件存在但内容为空') + '）' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是水下机器人（ROV/AUV）领域的资深技术文档分析助手。你擅长识别不同型号并提取结构化技术参数、撰写精炼摘要。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n【重要】文档中可能包含「表格数据」：表格用 | 分隔每行的各列，同一行各列表示【同一个型号】的一组参数（第一行常为表头，如：型号|参数1|参数2|...）。请严格按表格的行列对应关系识别每个型号及其参数，确保参数归属到正确的型号，不要张冠李戴；正文中提及的参数也要并入对应型号。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本（含表格，| 分隔每行各列）：\n' + text
@@ -893,7 +929,7 @@ return {
         if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
         const effective2 = res2.text || res2.reasoning || ''
         parsed = parseModelJson(effective2)
-        if (!parsed) { try { const dbgDir = joinPath(dir, 'kb', 'enrich-debug'); await ensureDir(dbgDir); await writeJson(joinPath(dbgDir, id + '.json'), { id: id, at: new Date().toISOString(), attempt1: { text: res.text.slice(0, 2000), reasoning: (res.reasoning || '').slice(0, 2000) }, attempt2: { text: res2.text.slice(0, 2000), reasoning: (res2.reasoning || '').slice(0, 2000) } }) } catch (e) {} return { ok: false, message: '模型输出解析失败（已自动重试一次），请再次点击重试', rawPreview: effective2.slice(0, 300) } }
+        if (!parsed) { try { const dbgDir = await dataPath('kb', 'enrich-debug'); await ensureDir(dbgDir); await writeJson(await dataPath('kb', 'enrich-debug', id + '.json'), { id: id, at: new Date().toISOString(), attempt1: { text: res.text.slice(0, 2000), reasoning: (res.reasoning || '').slice(0, 2000) }, attempt2: { text: res2.text.slice(0, 2000), reasoning: (res2.reasoning || '').slice(0, 2000) } }) } catch (e) {} return { ok: false, message: '模型输出解析失败（已自动重试一次），请再次点击重试', rawPreview: effective2.slice(0, 300) } }
       }
       let models = Array.isArray(parsed.models) ? parsed.models : []
       if (!models.length) models = [{ model: parsed.model || '', name: parsed.name || '', category: parsed.category || '', params: parsed.params || [], summary: parsed.summary || '' }]
@@ -991,10 +1027,10 @@ return {
     }
 
     // ---- 文档项目（M3） ----
-    async function readProj(id) { return readJson(joinPath(await dataDir(), 'projects', id + '.json')) }
-    async function writeProj(proj) { await ensureDir(joinPath(await dataDir(), 'projects')); await writeJson(joinPath(await dataDir(), 'projects', proj.id + '.json'), proj) }
+    async function readProj(id) { validateId(id, '项目ID'); return readJson(await dataPath('projects', id + '.json')) }
+    async function writeProj(proj) { validateId(proj.id, '项目ID'); await ensureDir(await dataPath('projects')); await writeJson(await dataPath('projects', proj.id + '.json'), proj) }
     async function listProjs() {
-      const dir = joinPath(await dataDir(), 'projects')
+      const dir = await dataPath('projects')
       if (!fs) return []
       try {
         const target = await fs.resolve(dir); const info = await fs.stat(target); if (!info) return []
@@ -1036,7 +1072,8 @@ return {
     }
     async function deleteProject(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }
-      const dir = await dataDir(); const p = joinPath(dir, 'projects', id + '.json')
+      validateId(id, '项目ID')
+      const p = await dataPath('projects', id + '.json')
       try { await fs.rm(p) } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
       return { ok: true }
     }
@@ -1080,19 +1117,19 @@ return {
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少上传文档' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
       if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
-      const dir = await dataDir(); const id = 'doc_' + Date.now().toString(36)
-      const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
-      await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
-      const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py')
-      const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
+      const id = 'doc_' + Date.now().toString(36)
+      const safeName = sanitizeFileName(args.fileName)
+      const tmpDir = await dataPath('projects', 'tmp', id); await ensureDir(tmpDir)
+      await writeTextFile(await dataPath('projects', 'tmp', id, 'upload.b64'), String(args.base64))
+      const scriptPath = await dataPath('scripts', 'ingest_file.py')
+      const res = await shell.runFile(await pythonExe(), [scriptPath, await dataPath('projects', 'tmp', id, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(await dataPath('projects', 'tmp', id, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
-        const pdfPath = joinPath(tmpDir, safeName)
+        const pdfPath = await dataPath('projects', 'tmp', id, safeName)
         if (/^.*\.pdf$/i.test(safeName)) {
-          const ocrR = await ocrPdfFile(pdfPath, joinPath(tmpDir, 'extracted.txt'))
-          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
+          const ocrR = await ocrPdfFile(pdfPath, await dataPath('projects', 'tmp', id, 'extracted.txt'))
+          if (ocrR.ok) { try { const t = await fs.resolve(await dataPath('projects', 'tmp', id, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
         }
       }
       if (!text) return { ok: false, message: '文档解析失败：' + pickStdout(res).slice(0, 300) }
@@ -1337,19 +1374,20 @@ return {
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少招标文件' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
       if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
-      const dir = await dataDir(); const id = 'bid_' + Date.now().toString(36)
-      const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
-      await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
-      const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py'); const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
+      const id = 'bid_' + Date.now().toString(36)
+      const safeName = sanitizeFileName(args.fileName)
+      const tmpDir = await dataPath('projects', 'tmp', id); await ensureDir(tmpDir)
+      await writeTextFile(await dataPath('projects', 'tmp', id, 'upload.b64'), String(args.base64))
+      const scriptPath = await dataPath('scripts', 'ingest_file.py')
+      const res = await shell.runFile(await pythonExe(), [scriptPath, await dataPath('projects', 'tmp', id, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
-      try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
+      try { const t = await fs.resolve(await dataPath('projects', 'tmp', id, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
         // 扫描件招标文件：OCR
-        const pdfPath = joinPath(tmpDir, safeName)
+        const pdfPath = await dataPath('projects', 'tmp', id, safeName)
         if (/^.*\.pdf$/i.test(safeName)) {
-          const ocrR = await ocrPdfFile(pdfPath, joinPath(tmpDir, 'extracted.txt'))
-          if (ocrR.ok) { try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
+          const ocrR = await ocrPdfFile(pdfPath, await dataPath('projects', 'tmp', id, 'extracted.txt'))
+          if (ocrR.ok) { try { const t = await fs.resolve(await dataPath('projects', 'tmp', id, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' } }
         }
       }
       if (!text) return { ok: false, message: '招标文件解析失败：' + pickStdout(res).slice(0, 300) }
