@@ -128,14 +128,20 @@ const webLocal = {
 }
 
 export const name = 'docsuite'
-export const inject = ['webServer', 'llm']
+export const inject = ['webServer']
 
 export function apply(ctx) {
   const fs = fsLocal
   const shell = shellLocal
   const subprocess = subprocessLocal
   const web = webLocal
-  const llm = ctx.llm
+  // llm 服务：启动时 base bundle 的 llm 可能尚未激活，业务体全部在请求处理时才用 llm，
+  // 因此惰性解析——每个守卫/调用点重新 ctx.get('llm')，首次成功即缓存到 llm。
+  let llm = null
+  const llmResolve = () => {
+    try { const s = (ctx && typeof ctx.get === 'function') ? ctx.get('llm') : undefined; llm = s || null } catch (e) { llm = null }
+    return llm
+  }
   const agentDefaultModel = null
   // 数据目录：优先环境变量 DOCSUITE_DATA_ROOT；否则用 cwd（DSH 启动目录即工作区根）。
   // 注意：不用 DSH_HOME（它是用户配置目录，不是工作区根）。
@@ -218,9 +224,17 @@ const HOST_FOOTER = `
 
 const HOST_CLOSE = `
   let disposed = false
-  const cleanup = () => { if (disposed) return; disposed = true; for (const d of cleanups) { try { d() } catch (e) {} } }
-  try { disposeRouteFn && disposeRouteFn() } catch (e) {}
-  ctx.effect(cleanup)
+  const cleanup = () => {
+    if (disposed) return
+    disposed = true
+    // 路由销毁必须放在 cleanup 里（仅在 fiber 销毁时执行），不能立即调用——否则路由刚注册就被注销。
+    try { if (disposeRouteFn) disposeRouteFn() } catch (e) {}
+    for (const d of cleanups) { try { d() } catch (e) {} }
+  }
+  // Cordis 的 ctx.effect 会立即执行回调并把返回值作为销毁器（对照 dsh-deepseek-billing 的
+  // ctx.effect(() => ctx.webServer.register(...)) 模式）。这里传 (() => cleanup)，
+  // 让 cleanup 仅在 fiber 销毁时执行一次；直接传 cleanup 会被立即执行并清空全部 handler。
+  ctx.effect(() => cleanup)
   return cleanup
 }
 `
@@ -254,7 +268,27 @@ window.__ModuleLoader__.load({
     var react = require('react');
     var React = react;
     var el = react.createElement;
-    var styles = { insert: function () { return function () {}; } };
+    // CSS 注入（对照 dsh-deepseek-billing 的 lib/client.js 模式：直接创建 <style> 挂到
+    // document.head，带去重 data-plugin-css；销毁时移除）。动态插件时代的 styles 服务
+    // 在安装式 client 里不存在，必须自己注入，否则页面只有文字没有样式。
+    var styles = {
+      insert: function (css, tagId) {
+        var id = tagId || 'docsuite-css';
+        if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="' + id + '"]') === null) {
+          var tag = document.createElement('style');
+          tag.dataset.plugin = 'docsuite';
+          tag.dataset.pluginCss = id;
+          tag.textContent = css;
+          document.head.appendChild(tag);
+        }
+        return function () {
+          if (typeof document !== 'undefined') {
+            var t = document.querySelector('style[data-plugin-css="' + id + '"]');
+            if (t) t.remove();
+          }
+        };
+      }
+    };
 
     function stripUndefined(v) {
       if (v === undefined) return null;
