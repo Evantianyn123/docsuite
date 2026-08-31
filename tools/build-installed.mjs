@@ -41,10 +41,62 @@ import { existsSync } from 'node:fs'
 import { exec, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join, resolve, relative, isAbsolute, dirname, basename, extname, sep } from 'node:path'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
+
+// ---- F1 数据定位器与迁移状态（v5 设计）----
+function dshHomeDir() { return process.env.DSH_HOME || join(os.homedir(), '.dsh') }
+function bootstrapPath() { return join(dshHomeDir(), 'docsuite-bootstrap.json') }
+function migrationStatePath() { return join(dshHomeDir(), 'docsuite-migration.json') }
+async function readJsonFileSafe(absPath) { try { return JSON.parse(await readFile(absPath, 'utf8')) } catch (e) { return null } }
+async function writeJsonAtomic(absPath, obj) {
+  await fsMkdir(dirname(absPath), { recursive: true })
+  const tmp = absPath + '.tmp-' + Math.random().toString(36).slice(2, 8)
+  await writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8')
+  try { await fsRename(tmp, absPath) } catch (e) { await fsRm(absPath, { force: true }); await fsRename(tmp, absPath) }
+}
+async function readBootstrap() { return readJsonFileSafe(bootstrapPath()) }
+async function writeBootstrap(dataDir, extra) { await writeJsonAtomic(bootstrapPath(), Object.assign({ dataDir: String(dataDir), updatedAt: new Date().toISOString() }, extra || {})) }
+async function clearBootstrap() { await fsRm(bootstrapPath(), { force: true }) }
+async function readMigrationState() { return readJsonFileSafe(migrationStatePath()) }
+async function writeMigrationState(s) { await writeJsonAtomic(migrationStatePath(), s) }
+async function clearMigrationState() { await fsRm(migrationStatePath(), { force: true }) }
+async function dirUsable(p) { try { const st = await fsStat(p); return !!st && st.type === 'directory' } catch (e) { return false } }
+function sha256Hex(data) { return createHash('sha256').update(data).digest('hex') }
+async function sha256File(p) { return sha256Hex(await readFile(p)) }
+async function walkFiles(dir, base) {
+  const out = []
+  const entries = await readdir(dir, { withFileTypes: true })
+  for (const e of entries) {
+    const full = join(dir, e.name)
+    const rel = base ? join(base, e.name) : e.name
+    if (e.isDirectory()) out.push(...await walkFiles(full, rel))
+    else if (e.isFile()) out.push({ path: rel, size: (await fsStat(full)).size })
+  }
+  return out
+}
+async function computeManifest(dir) {
+  const files = await walkFiles(dir, '')
+  const out = []
+  for (const f of files) out.push({ path: f.path, size: f.size, sha256: await sha256File(join(dir, f.path)) })
+  return out.sort((a, b) => a.path.localeCompare(b.path))
+}
+async function verifyManifest(srcDir, dstDir) {
+  const src = await computeManifest(srcDir)
+  const dst = await computeManifest(dstDir)
+  if (src.length !== dst.length) return { ok: false, reason: '文件数不一致: 源 ' + src.length + ' vs 目标 ' + dst.length }
+  for (let i = 0; i < src.length; i++) {
+    const a = src[i]; const b = dst[i]
+    if (a.path !== b.path || a.size !== b.size || a.sha256 !== b.sha256) return { ok: false, reason: '校验不一致: ' + a.path }
+  }
+  return { ok: true, count: src.length }
+}
+// 迁移门闩：迁移期间除 health/migrate-status 外所有数据端点 503
+const MIGRATION_PASSTHROUGH = new Set(['docsuite/health', 'docsuite/migrate/status'])
+let migrating = false
 
 // ---- F2 路径安全层（v5 设计）----
 const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
@@ -266,6 +318,13 @@ export function apply(ctx) {
       const url = new URL(req.url || '/', 'http://localhost')
       // 路由路径 /docsuite/<method>（注意：/api/* 被 DSH api-gateway 占用，必须避开 /api 前缀）
       const method = decodeURIComponent(url.pathname.replace(/^\\//, '').replace(/\\/+$/, ''))
+      // 迁移门闩（v5 F1）：迁移期间除 health/migrate-status 外所有数据端点 503
+      if (migrating && !MIGRATION_PASSTHROUGH.has(method)) {
+        res.statusCode = 503
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, code: 'DATA_MIGRATING', message: '数据迁移中，请稍候' }))
+        return
+      }
       const handler = routeHandlers.get(method)
       if (!handler) {
         res.statusCode = 404

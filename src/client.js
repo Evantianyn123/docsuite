@@ -712,7 +712,8 @@ return {
 
     function DocSuiteApp() {
       const [page, setPage] = React.useState('home'); const [sum, setSum] = React.useState(null); const [err, setErr] = React.useState(null)
-      React.useEffect(() => { rpc('docsuite/state/summary').then(setSum).catch((e) => setErr(String((e && e.message) || e))) }, [])
+      // S3: summary 返回 {ok:false}（如 DATA_DIR_UNAVAILABLE）时显示具体错误而非空统计
+      React.useEffect(() => { rpc('docsuite/state/summary').then((r) => { if (r && r.ok) setSum(r); else setErr((r && r.message) || '加载失败') }).catch((e) => setErr(String((e && e.message) || e))) }, [])
       let body = null
       if (page === 'settings') body = el(SettingsContent, null)
       else if (page === 'home') body = el(Home, { sum: sum, onOpen: (k) => setPage(k) })

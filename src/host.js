@@ -102,7 +102,73 @@ return {
       } catch (e) { return '' }
     }
     async function writeJson(absPath, obj) { await writeTextFile(absPath, JSON.stringify(obj, null, 2)) }
-    async function getConfig() { const cfg = await readJson(CONFIG_PATH); return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : DEFAULT_CONFIG }
+    // ---- F1 数据定位器启动解析（v5）----
+    // 启动顺序: 恢复未完成迁移 → bootstrap（fail-closed）→ 兼容旧 config 指针 → 默认 cwd/.docsuite-data
+    let rootInitError = null
+    let rootInitPromise = null
+    async function recoverMigration() {
+      const st = await readMigrationState()
+      if (!st) return
+      if (st.phase === 'COPYING' || st.phase === 'VERIFIED') {
+        // 未发布: 清理 staging，迁移未生效
+        try { if (st.staging) await fs.rm(st.staging) } catch (e) {}
+        await clearMigrationState()
+      } else if (st.phase === 'PUBLISHED' || st.phase === 'SWITCHED') {
+        // 已发布: 校验目标 → 通过则补完 bootstrap；失败则隔离 target 并恢复旧 bootstrap
+        if (st.target && await dirUsable(st.target)) {
+          try {
+            const v = await verifyManifest(st.source, st.target)
+            if (v.ok) {
+              await writeBootstrap(st.target, { operationId: st.operationId })
+              await clearMigrationState()
+              return
+            }
+          } catch (e) {}
+          try { await fs.rename(st.target, st.target + '.broken-' + Date.now().toString(36)) } catch (e2) {}
+        }
+        if (st.prevBootstrap && st.prevBootstrap.dataDir) await writeBootstrap(st.prevBootstrap.dataDir, { operationId: st.operationId })
+        else await clearBootstrap()
+        await clearMigrationState()
+      }
+    }
+    function ensureRootInit() {
+      if (!rootInitPromise) {
+        rootInitPromise = (async () => {
+          try {
+            await recoverMigration()
+            const boot = await readBootstrap()
+            if (boot && boot.dataDir) {
+              if (!(await dirUsable(boot.dataDir))) {
+                const e = new Error('数据目录不可访问: ' + boot.dataDir + '（bootstrap 指向的目标离线/损坏，请检查磁盘，或在设置中重新指定数据目录）')
+                e.code = 'DATA_DIR_UNAVAILABLE'
+                throw e
+              }
+              rootDir = boot.dataDir
+            } else {
+              // 兼容旧迁移：cwd/.docsuite-data/config.json 内的 dataDir 指针
+              const legacyCfg = await readJson(CONFIG_PATH)
+              if (legacyCfg && legacyCfg.dataDir && typeof legacyCfg.dataDir === 'string' && legacyCfg.dataDir.length > 0 && legacyCfg.dataDir !== rootDir) {
+                rootDir = legacyCfg.dataDir
+              }
+            }
+          } catch (e) { rootInitError = e }
+          CONFIG_PATH = joinPath(rootDir, 'config.json')
+        })()
+      }
+      return rootInitPromise
+    }
+    async function getConfig() {
+      await ensureRootInit()
+      if (rootInitError) throw rootInitError
+      const cfg = await readJson(CONFIG_PATH)
+      return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : Object.assign({}, DEFAULT_CONFIG, { dataDir: rootDir })
+    }
+    async function dataDir() {
+      await ensureRootInit()
+      if (rootInitError) throw rootInitError
+      const cfg = await getConfig()
+      return (cfg.dataDir && String(cfg.dataDir)) || rootDir
+    }
     // F2 v5: config/set 字段白名单 + 深层校验；禁止通过通用配置修改 dataDir/version
     async function saveConfig(patch) {
       const cur = await getConfig(); const clean = {}; const p = patch || {}
@@ -132,7 +198,6 @@ return {
       for (const k of ['dataDir', 'version']) { if (p[k] !== undefined) bad('禁止通过通用配置修改 ' + k) }
       const next = Object.assign({}, cur, clean); await ensureDir(rootDir); await writeJson(CONFIG_PATH, next); return next
     }
-    async function dataDir() { const cfg = await getConfig(); return (cfg.dataDir && String(cfg.dataDir)) || rootDir }
     // F2: 统一数据路径入口（safeJoin 边界校验 + 符号链接/联接检查，带缓存）
     async function dataPath(...parts) {
       const root = await dataDir()
@@ -991,39 +1056,89 @@ return {
     }
 
     // ---- 数据目录迁移（M5） ----
+    // F1 v5: 迁移 = 全局门闩 + staging + SHA-256 校验 + 原子发布 + bootstrap 更新 + 崩溃恢复状态机
     async function migrateData(args) {
       const target = String((args && args.targetDir) || '').trim()
       if (!target) return { ok: false, message: '请输入目标目录' }
-      const dir = await dataDir()
-      if (target.toLowerCase() === dir.toLowerCase()) return { ok: false, message: '目标目录与当前目录相同' }
-      if (!shell) return { ok: false, message: 'shell 服务不可用' }
-      // 预检：插件的 fs/shell 沙箱（workspace-write）只允许写入 workspaceRoot 及系统临时目录。
-      // 迁移目标必须位于这些可写根内，否则写 config.json 会被沙箱拒绝（FS_SANDBOX_DENIED）。
-      const targetNorm0 = target.replace(/[\\/]+$/, '')
+      if (!fs) return { ok: false, message: 'fs 服务不可用' }
+      await ensureRootInit()
+      if (rootInitError) throw rootInitError
+      const source = await dataDir()
+      // 目标规范化（安全层）
+      let targetNorm = ''
+      try { targetNorm = normalizeWin(target).replace(/[\\/]+$/, '') } catch (e) { return { ok: false, message: '目标目录非法' } }
+      if (targetNorm.toLowerCase() === source.toLowerCase()) return { ok: false, message: '目标目录与当前目录相同' }
+      // 双向包含检查
+      const relT = relative(source, targetNorm)
+      if (relT !== '' && relT !== '..' && !relT.startsWith('..' + sep) && !isAbsolute(relT)) return { ok: false, message: '目标目录不能位于当前数据目录内部' }
+      const relS = relative(targetNorm, source)
+      if (relS !== '' && relS !== '..' && !relS.startsWith('..' + sep) && !isAbsolute(relS)) return { ok: false, message: '目标目录不能是当前数据目录的祖先' }
+      // workspaceRoot 可写约束
       const wsRoot = workspaceRoot ? String(workspaceRoot).replace(/[\\/]+$/, '') : ''
-      const okTarget = !wsRoot || targetNorm0.toLowerCase() === wsRoot.toLowerCase() || targetNorm0.toLowerCase().startsWith(wsRoot.toLowerCase() + '\\') || targetNorm0.toLowerCase().startsWith(wsRoot.toLowerCase() + '/')
-      if (!okTarget) return { ok: false, message: '目标目录不在插件可写范围内：当前会话沙箱（workspace-write）只允许数据目录位于工作区根 ' + wsRoot + ' 或其子目录（或系统临时目录）。请选择 ' + wsRoot + ' 下的目录作为新数据目录。' }
-      const targetNorm = target.replace(/[\\/]+$/, '')
+      const okTarget = !wsRoot || targetNorm.toLowerCase() === wsRoot.toLowerCase() || targetNorm.toLowerCase().startsWith(wsRoot.toLowerCase() + '\\') || targetNorm.toLowerCase().startsWith(wsRoot.toLowerCase() + '/')
+      if (!okTarget) return { ok: false, message: '目标目录不在工作区根 ' + wsRoot + ' 内，请选择其下目录作为新数据目录' }
+      // 第一阶段: 目标必须不存在或为空
+      const tInfo = await fs.stat(targetNorm)
+      if (tInfo) {
+        const entries = await fs.listDir(targetNorm)
+        if (entries && entries.length > 0) return { ok: false, code: 'TARGET_NOT_EMPTY', message: '目标目录非空（第一阶段要求目标不存在或为空），请选择空目录；数据合并功能后续提供' }
+      }
+      // 已有未完成迁移
+      const pending = await readMigrationState()
+      if (pending) return { ok: false, code: 'MIGRATION_PENDING', message: '存在未完成的迁移（phase=' + pending.phase + '），请重启 DSH 自动恢复，或手动删除 ' + migrationStatePath() }
+      const prevBootstrap = await readBootstrap()
+      const operationId = 'mig-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      const staging = targetNorm + '.staging-' + Date.now().toString(36)
       try {
-        await ensureDir(targetNorm)
-        const robocopyCmd = 'robocopy "' + dir + '" "' + targetNorm + '" /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS'
-        const rc = await shell.run(shell.resolve({ command: robocopyCmd }))
-        const rcCode = exitCodeOf(rc)
-        if (rcCode != null && rcCode >= 8) return { ok: false, message: '复制失败（robocopy 退出码 ' + rcCode + '）：' + pickStdout(rc).slice(0, 300) }
-        const cfg = await readJson(joinPath(targetNorm, 'config.json'))
-        if (cfg && typeof cfg === 'object') {
-          cfg.dataDir = targetNorm
-          await writeTextFile(joinPath(targetNorm, 'config.json'), JSON.stringify(cfg, null, 2))
-        } else {
-          const newCfg = Object.assign({}, DEFAULT_CONFIG, { dataDir: targetNorm })
-          await writeTextFile(joinPath(targetNorm, 'config.json'), JSON.stringify(newCfg, null, 2))
+        migrating = true
+        await writeMigrationState({ operationId, source, staging, target: targetNorm, phase: 'COPYING', prevBootstrap: prevBootstrap, startedAt: new Date().toISOString() })
+        await fs.mkdir(staging)
+        await fs.cp(source, staging)
+        const v = await verifyManifest(source, staging)
+        if (!v.ok) {
+          await fs.rm(staging)
+          await clearMigrationState()
+          return { ok: false, code: 'MIGRATION_VERIFY_FAILED', message: '复制校验失败: ' + v.reason + '（源数据未改动）' }
         }
+        await writeMigrationState({ operationId, source, staging, target: targetNorm, phase: 'VERIFIED', prevBootstrap: prevBootstrap, startedAt: (await readMigrationState()).startedAt })
+        // 发布: target 已存在且为空 → 移除空目录; staging 原子改名 target
+        if (tInfo) await fs.rm(targetNorm)
+        await fs.rename(staging, targetNorm)
+        await writeMigrationState({ operationId, source, staging, target: targetNorm, phase: 'PUBLISHED', prevBootstrap: prevBootstrap, startedAt: (await readMigrationState()).startedAt })
+        // 更新 bootstrap（原子）
+        await writeBootstrap(targetNorm, { operationId })
+        await writeMigrationState({ operationId, source, staging, target: targetNorm, phase: 'SWITCHED', prevBootstrap: prevBootstrap, startedAt: (await readMigrationState()).startedAt })
+        // 当前进程验证: 读目标 config / 列 items
+        try {
+          const cfg = await readJsonFileSafe(joinPath(targetNorm, 'config.json'))
+          if (!cfg) { /* config.json 可不存在（默认配置），仅确认目录可读 */ }
+          const itemsDir = joinPath(targetNorm, 'kb', 'items')
+          const st2 = await fs.stat(itemsDir)
+          if (!st2) { const e = new Error('目标缺少 kb/items 目录'); throw e }
+        } catch (e2) {
+          // 回滚 bootstrap 旧值 + 恢复内存
+          if (prevBootstrap && prevBootstrap.dataDir) await writeBootstrap(prevBootstrap.dataDir, { operationId })
+          else await clearBootstrap()
+          await clearMigrationState()
+          return { ok: false, message: '迁移后验证失败，已回滚: ' + String((e2 && e2.message) || e2) }
+        }
+        // 切换内存状态
         rootDir = targetNorm
         CONFIG_PATH = joinPath(targetNorm, 'config.json')
         indexCache = null; indexDirty = true
-        await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + dir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' }))
-        return { ok: true, dataDir: targetNorm }
-      } catch (e) { return { ok: false, message: '迁移失败：' + String((e && e.message) || e) } }
+        await clearMigrationState()
+        return { ok: true, dataDir: targetNorm, backupDir: source, note: '重启 DSH 验证数据完整后，可在设置页确认清理旧目录 ' + source }
+      } catch (e) {
+        try { await fs.rm(staging) } catch (e2) {}
+        await clearMigrationState()
+        return { ok: false, message: '迁移失败（源数据未改动）: ' + String((e && e.message) || e) }
+      } finally {
+        migrating = false
+      }
+    }
+    async function migrateStatus() {
+      const st = await readMigrationState()
+      return { ok: true, migrating: migrating, pending: st || null }
     }
 
     // ---- 文档项目（M3） ----
@@ -1546,6 +1661,7 @@ return {
     register('docsuite/web/search', async (args) => webSearch(args || {}))
     register('docsuite/web/import', async (args) => webImport(args || {}))
     register('docsuite/migrate', async (args) => migrateData(args || {}))
+    register('docsuite/migrate/status', async () => migrateStatus())
     register('docsuite/tpl/list', async () => ({ templates: await listTemplates() }))
     register('docsuite/tpl/learn', async (args) => learnTemplate(args || {}))
     register('docsuite/tpl/create-manual', async (args) => createManualTemplate(args || {}))
