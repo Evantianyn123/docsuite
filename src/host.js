@@ -8,7 +8,12 @@ return {
     const shell = ctx.get('shell')
     const subprocess = ctx.get('subprocess')
     const sandboxPolicy = ctx.get('sandboxPolicy')
-    const llm = ctx.get('llm')
+    // llm 惰性解析：动态插件挂载时 llm 服务可能尚未激活；业务体在请求处理时才用 llm。
+    let llm = null
+    const llmResolve = () => {
+      try { const s = ctx && typeof ctx.get === 'function' ? ctx.get('llm') : undefined; llm = s || null } catch (e) { llm = null }
+      return llm
+    }
     const agentDefaultModel = ctx.get('agentDefaultModel')
     const web = ctx.get('web')
 
@@ -538,11 +543,12 @@ return {
       if (agentDefaultModel && typeof agentDefaultModel.currentSelection === 'function') {
         try { const sel = agentDefaultModel.currentSelection(); if (sel && sel.provider && sel.model) return { provider: sel.provider, model: sel.model } } catch (e) {}
       }
-      if (llm && typeof llm.listProviders === 'function') {
+      const svc = llmResolve()
+      if (svc && typeof svc.listProviders === 'function') {
         try {
-          const providers = llm.listProviders()
+          const providers = svc.listProviders()
           if (providers && providers.length && providers[0].id) {
-            try { const models = await llm.listModels(providers[0].id); if (models && models.length && models[0].id) return { provider: providers[0].id, model: models[0].id } } catch (e) {}
+            try { const models = await svc.listModels(providers[0].id); if (models && models.length && models[0].id) return { provider: providers[0].id, model: models[0].id } } catch (e) {}
           }
         } catch (e) {}
       }
@@ -606,7 +612,7 @@ return {
     async function learnTemplate(args) {
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少文件' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const dir = await dataDir(); const id = 'tpl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
       const tmpDir = joinPath(dir, 'templates', 'tmp', id)
       await ensureDir(tmpDir); await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
@@ -861,7 +867,7 @@ return {
       try { const t = await fs.resolve(p); const info = await fs.stat(t); if (!info) return { ok: true, text: '', total: 0 }; const text = await readTextTolerant(t); return { ok: true, text: text.slice(0, 3000), total: text.length } } catch (e) { return { ok: true, text: '', total: 0 } }
     }
     async function enrichItem(args) {
-      const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }; if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }; if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const item = await readItem(id); if (!item) return { ok: false, message: '条目不存在' }
       const dir = await dataDir(); const srcId = item.sourceDir || id
       const textPath = joinPath(dir, 'kb', 'sources', srcId, 'extracted.txt')
@@ -1037,7 +1043,7 @@ return {
         await updateStatus(proj); await writeProj(proj)
         return { ok: true, project: proj, fromUser: true }
       }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const kindName = KIND_NAMES[proj.kind] || '技术文档'
       let tplRef = ''
@@ -1068,7 +1074,7 @@ return {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少上传文档' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const dir = await dataDir(); const id = 'doc_' + Date.now().toString(36)
       const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
       await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
@@ -1121,7 +1127,7 @@ return {
     // AI 生成机器人边界初稿：依据项目主题/机型 + 知识库设备清单
     async function robotSpecDraft(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const items = await listItems()
       const devices = items.filter((it) => (it.model || it.name) && (it.params || []).length).slice(0, 40).map((it) => ({ id: it.id, name: it.name || '', model: it.model || '', manufacturer: it.manufacturer || '', category: it.category || '', params: (it.params || []).slice(0, 10).map((p) => p.name + ' ' + (p.value || '') + (p.unit || '')).join('、'), summary: (it.summary || '').slice(0, 120) }))
@@ -1162,7 +1168,7 @@ return {
     async function genSection(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
       const nodeId = args && args.nodeId; const node = findNode(proj.outline || [], nodeId); if (!node) return { ok: false, message: '章节不存在' }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const query = (node.title || '') + ' ' + (node.desc || '') + ' ' + proj.title
       const kb = await searchItems({ q: query.slice(0, 100), pageSize: 5 })
@@ -1326,7 +1332,7 @@ return {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
       if (!args || !args.fileName || !args.base64) return { ok: false, message: '缺少招标文件' }
       const tc = await ensurePythonToolchain(); if (!tc.ok) return { ok: false, message: 'Python 工具链未就绪：' + tc.message }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const dir = await dataDir(); const id = 'bid_' + Date.now().toString(36)
       const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
       await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
@@ -1363,7 +1369,7 @@ return {
     async function bidAnswer(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
       const idx = args && args.index; const row = proj.bidMatrix && proj.bidMatrix[idx]; if (!row) return { ok: false, message: '要求不存在' }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const kb = await searchItems({ q: row.requirement.slice(0, 100), pageSize: 4 })
       let kbText = ''; let refIds = []
@@ -1381,7 +1387,7 @@ return {
     }
     async function bidSchedule(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const terms = proj.bidTerms || {}
       const contractDate = (args && args.contractDate) || new Date().toISOString().slice(0, 10)
@@ -1406,7 +1412,7 @@ return {
     // ---- PPT（M4） ----
     async function pptPreview(args) {
       const proj = await readProj(args && args.id); if (!proj) return { ok: false, message: '项目不存在' }
-      if (!llm) return { ok: false, message: 'LLM 服务不可用' }
+      if (!llmResolve()) return { ok: false, message: 'LLM 服务不可用' }
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const leaves = leafNodes(proj.outline || [])
       let bodyText = ''
