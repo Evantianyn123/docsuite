@@ -36,14 +36,15 @@ hostBody = hostBody.replace(/    const register = \(method, handler\) => \{\n   
 // 骨架（含 Node 兼容层）
 const HOST_PRELUDE = `// DocSuite 文档工坊 — 安装式 link 插件（host）
 // 由 build.mjs 从 src/host.js 机械生成；改业务逻辑请改 src/host.js 后重新 build。
-import { readFile, writeFile, readdir, stat as fsStat } from 'node:fs/promises'
+import { readFile, writeFile, readdir, stat as fsStat, mkdir as fsMkdir, rm as fsRm, cp as fsCp, rename as fsRename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { exec } from 'node:child_process'
+import { exec, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import os from 'node:os'
 
 const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 // ---- Node 原生兼容层（替代 DSH 的 ctx.get('fs'|'shell'|'subprocess'|'web')）----
 const fsLocal = {
@@ -81,6 +82,25 @@ const fsLocal = {
     }
     return out
   },
+  // F7: 目录/删除/复制/改名全部走 Node fs（原 New-Item/Remove-Item 在 cmd 默认 shell 下必失败）
+  async mkdir(dir) {
+    const p = typeof dir === 'string' ? dir : dir.targetKey
+    await fsMkdir(p, { recursive: true })
+  },
+  async rm(target) {
+    const p = typeof target === 'string' ? target : target.targetKey
+    await fsRm(p, { recursive: true, force: true })
+  },
+  async cp(src, dst) {
+    const s = typeof src === 'string' ? src : src.targetKey
+    const d = typeof dst === 'string' ? dst : dst.targetKey
+    await fsCp(s, d, { recursive: true })
+  },
+  async rename(src, dst) {
+    const s = typeof src === 'string' ? src : src.targetKey
+    const d = typeof dst === 'string' ? dst : dst.targetKey
+    await fsRename(s, d)
+  },
 }
 const shellLocal = {
   resolve({ command, env, timeoutMs, cwd }) { return { command, env, timeoutMs, cwd } },
@@ -94,6 +114,19 @@ const shellLocal = {
       return { exitCode: 0, code: 0, stdout: { text: String(stdout || '') }, stderr: { text: String(stderr || '') } }
     } catch (e) {
       return { exitCode: (e && e.code != null) ? e.code : 1, code: (e && e.code) || 1, stdout: { text: String((e && e.stdout) || '') }, stderr: { text: String((e && e.stderr) || (e && e.message) || '') } }
+    }
+  },
+  // F7: 外部程序用参数数组启动（execFile，无 shell 拼接/注入面）。默认 UTF-8 环境。
+  async runFile(file, args, opts) {
+    try {
+      const o = { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }) }
+      if (opts && opts.timeoutMs) o.timeout = opts.timeoutMs
+      if (opts && opts.cwd) o.cwd = opts.cwd
+      if (opts && opts.env) o.env = Object.assign({}, o.env, opts.env)
+      const { stdout, stderr } = await execFileAsync(file, args || [], o)
+      return { exitCode: 0, code: 0, stdout: { text: String(stdout || '') }, stderr: { text: String(stderr || '') } }
+    } catch (e) {
+      return { exitCode: (e && typeof e.code === 'number') ? e.code : 1, code: (e && e.code) || 1, stdout: { text: String((e && e.stdout) || '') }, stderr: { text: String((e && e.stderr) || (e && e.message) || '') } }
     }
   },
 }

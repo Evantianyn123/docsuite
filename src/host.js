@@ -44,11 +44,8 @@ return {
     }
 
     async function ensureDir(dir) {
-      if (!shell) return
-      try {
-        const spec = shell.resolve({ command: 'New-Item -ItemType Directory -Force -Path "' + String(dir).replace(/"/g, '\\"') + '" | Out-Null' })
-        await shell.run(spec)
-      } catch (e) { console.log('[docsuite] ensureDir failed:', String((e && e.message) || e)) }
+      if (!fs) return
+      try { await fs.mkdir(dir) } catch (e) { console.log('[docsuite] ensureDir failed:', String((e && e.message) || e)) }
     }
     async function readJson(absPath) {
       if (!fs) return undefined
@@ -441,26 +438,31 @@ return {
       'main()',
     ].join('\n')
 
+    // python 绝对路径（resolveExecutable，缓存），避免硬编码 'python'（F7）
+    let pythonExeCache = null
+    async function pythonExe() {
+      if (pythonExeCache) return pythonExeCache
+      try { pythonExeCache = await subprocess.resolveExecutable('python'); return pythonExeCache } catch (e) { return 'python' }
+    }
+
     async function depsInstalled() {
       if (!shell) return false
       try {
-        const res = await shell.run(shell.resolve({ command: 'python -c "import pypdf, docx"' }))
-        const code = exitCodeOf(res)
-        if (code === 0) return true
-        return false
+        const res = await shell.runFile(await pythonExe(), ['-c', 'import pypdf, docx'])
+        return exitCodeOf(res) === 0
       } catch (e) { return false }
     }
     async function pptDepsInstalled() {
       if (!shell) return false
-      try { const res = await shell.run(shell.resolve({ command: 'python -c "import pptx"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
+      try { const res = await shell.runFile(await pythonExe(), ['-c', 'import pptx']); return exitCodeOf(res) === 0 } catch (e) { return false }
     }
     async function pdfTblDepsInstalled() {
       if (!shell) return false
-      try { const res = await shell.run(shell.resolve({ command: 'python -c "import pdfplumber"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
+      try { const res = await shell.runFile(await pythonExe(), ['-c', 'import pdfplumber']); return exitCodeOf(res) === 0 } catch (e) { return false }
     }
     async function ocrDepsInstalled() {
       if (!shell) return false
-      try { const res = await shell.run(shell.resolve({ command: 'python -c "import fitz; import rapidocr_onnxruntime"' })); return exitCodeOf(res) === 0 } catch (e) { return false }
+      try { const res = await shell.runFile(await pythonExe(), ['-c', 'import fitz; import rapidocr_onnxruntime']); return exitCodeOf(res) === 0 } catch (e) { return false }
     }
     async function ensurePythonToolchain() {
       if (!shell) return { ok: false, message: 'shell 服务不可用' }
@@ -469,12 +471,12 @@ return {
       await ensureDir(scriptsDir)
       try { await writeTextFile(joinPath(scriptsDir, 'ingest_file.py'), PY_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'export_docx.py'), EXPORT_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'export_pptx.py'), PPT_SCRIPT); await writeTextFile(joinPath(scriptsDir, 'ocr_file.py'), OCR_SCRIPT) } catch (e) { return { ok: false, message: '写入脚本失败：' + String((e && e.message) || e) } }
       const need = []
-      if (!(await depsInstalled())) need.push('pypdf python-docx')
+      if (!(await depsInstalled())) need.push('pypdf', 'python-docx')
       if (!(await pdfTblDepsInstalled())) need.push('pdfplumber')
       if (!(await pptDepsInstalled())) need.push('python-pptx')
       if (!need.length) return { ok: true, message: '工具链就绪', installed: true }
       // 用 --user 避免系统 site-packages 不可写；--no-cache-dir 避免 DSH 临时目录权限问题
-      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install --user --no-cache-dir ' + need.join(' ') + ' --disable-pip-version-check' }))
+      const installRes = await shell.runFile(await pythonExe(), ['-m', 'pip', 'install', '--user', '--no-cache-dir'].concat(need, ['--disable-pip-version-check']), { timeoutMs: 10 * 60 * 1000 })
       const installText = (pickStdout(installRes) + ' ' + stderrOf(installRes)).replace(/WARNING:[\s\S]*?manually\./g, '').replace(/notice[^\n]*\n?/g, '').trim()
       if ((await depsInstalled()) && (await pptDepsInstalled())) return { ok: true, message: '依赖安装完成', installed: true }
       return { ok: false, message: '依赖安装失败：' + (installText || installRes).slice(-600), installed: false }
@@ -485,7 +487,7 @@ return {
       await ensureDir(scriptsDir)
       try { await writeTextFile(joinPath(scriptsDir, 'ocr_file.py'), OCR_SCRIPT) } catch (e) { return { ok: false, message: '写入脚本失败' } }
       if (await ocrDepsInstalled()) return { ok: true, message: 'OCR 就绪', installed: true }
-      const installRes = await shell.run(shell.resolve({ command: 'python -m pip install --user --no-cache-dir pymupdf rapidocr-onnxruntime --disable-pip-version-check' }))
+      const installRes = await shell.runFile(await pythonExe(), ['-m', 'pip', 'install', '--user', '--no-cache-dir', 'pymupdf', 'rapidocr-onnxruntime', '--disable-pip-version-check'], { timeoutMs: 10 * 60 * 1000 })
       const installText = (pickStdout(installRes) + ' ' + stderrOf(installRes)).replace(/WARNING:[\s\S]*?manually\./g, '').replace(/notice[^\n]*\n?/g, '').trim()
       if (await ocrDepsInstalled()) return { ok: true, message: 'OCR 依赖安装完成（首次使用较慢）', installed: true }
       return { ok: false, message: 'OCR 依赖安装失败：' + (installText || installRes).slice(-600), installed: false }
@@ -495,7 +497,7 @@ return {
       if (!tc.ok) return tc
       const dir = await dataDir()
       const scriptPath = joinPath(dir, 'scripts', 'ocr_file.py')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + pdfPath + '" "' + outTxtPath + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, pdfPath, outTxtPath], { timeoutMs: 10 * 60 * 1000 })
       if (/OCR_DONE/.test(pickStdout(res))) return { ok: true }
       return { ok: false, message: 'OCR 执行失败：' + pickStdout(res).slice(0, 200) + stderrOf(res).slice(0, 200) }
     }
@@ -621,7 +623,7 @@ return {
       await ensureDir(tmpDir); await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
       const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py')
       const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir, 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
       try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text) return { ok: false, message: '文本抽取失败：' + pickStdout(res).slice(0, 300) }
@@ -646,7 +648,7 @@ return {
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }
       await writeTemplate(tpl)
-      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + tmpDir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })) } catch (e) {}
+      try { await fs.rm(tmpDir) } catch (e) {}
       return { ok: true, template: tpl }
     }
     async function createManualTemplate(args) {
@@ -671,7 +673,7 @@ return {
       const dir = await dataDir()
       for (const sub of ['learned', 'manual']) {
         const p = joinPath(dir, 'templates', sub, id + '.json')
-        try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force "' + p.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })); else { const t = await fs.resolve(p); await fs.writeText(t, '') } } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
+        try { await fs.rm(p) } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
       }
       return { ok: true }
     }
@@ -778,7 +780,7 @@ return {
       const outdir = joinPath(dir, 'kb', 'sources', id)
       await ensureDir(outdir); await writeTextFile(joinPath(outdir, 'upload.b64'), String(args.base64))
       const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py'); const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(outdir, 'upload.b64') + '" "' + outdir + '" "' + safeName + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(outdir, 'upload.b64'), outdir, safeName], { timeoutMs: 5 * 60 * 1000 })
       const out = pickStdout(res); let parsed = null
       const lines = out.split('\n')
       for (let i = lines.length - 1; i >= 0; i--) { const line = lines[i].trim(); if (line.charAt(0) === '{') { try { parsed = JSON.parse(line); break } catch (e) {} } }
@@ -841,7 +843,7 @@ return {
     async function deleteItem(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }
       const dir = await dataDir(); const jsonPath = joinPath(dir, 'kb', 'items', id + '.json'); const srcDir = joinPath(dir, 'kb', 'sources', id)
-      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + jsonPath.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue; Remove-Item -Force -Recurse "' + srcDir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })); else { const t = await fs.resolve(jsonPath); await fs.writeText(t, '') } } catch (e) { try { const t = await fs.resolve(jsonPath); await fs.writeText(t, '') } catch (e2) {} }
+      try { await fs.rm(jsonPath); await fs.rm(srcDir) } catch (e) { try { const t = await fs.resolve(jsonPath); await fs.writeText(t, '') } catch (e2) {} }
       markDirty(); return { ok: true }
     }
     async function compareItems(args) {
@@ -1035,7 +1037,7 @@ return {
     async function deleteProject(args) {
       const id = args && args.id; if (!id) return { ok: false, message: '缺少 id' }
       const dir = await dataDir(); const p = joinPath(dir, 'projects', id + '.json')
-      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force "' + p.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })); else { const t = await fs.resolve(p); await fs.writeText(t, '') } } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
+      try { await fs.rm(p) } catch (e) { try { const t = await fs.resolve(p); await fs.writeText(t, '') } catch (e2) {} }
       return { ok: true }
     }
     async function genOutline(args) {
@@ -1083,7 +1085,7 @@ return {
       await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
       const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py')
       const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir, 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
       try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
@@ -1108,7 +1110,7 @@ return {
       proj.outline = cloneOutline(parsed.outline); proj.sections = {}; proj.references = {}
       proj.topic = (proj.topic || '') + (proj.topic ? '\n' : '') + '（依据上传文档生成大纲：' + safeName + '）'
       await updateStatus(proj); await writeProj(proj)
-      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + tmpDir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })) } catch (e) {}
+      try { await fs.rm(tmpDir) } catch (e) {}
       return { ok: true, project: proj, sourceDoc: safeName }
     }
     async function saveOutline(args) {
@@ -1294,8 +1296,7 @@ return {
       await writeTextFile(htmlPath, mdToHtml(md, proj.title))
       const url = 'file:///' + htmlPath.replace(/\\/g, '/')
       const tmpProfile = joinPath(outdir, 'chrome-profile-' + Date.now())
-      const cmd = '"' + chrome + '" --headless=new --disable-gpu --no-sandbox --user-data-dir="' + tmpProfile + '" --print-to-pdf="' + pdfPath + '" --print-to-pdf-no-header "' + url + '"'
-      const res = await shell.run(shell.resolve({ command: cmd }))
+      const res = await shell.runFile(chrome, ['--headless=new', '--disable-gpu', '--no-sandbox', '--user-data-dir=' + tmpProfile, '--print-to-pdf=' + pdfPath, '--print-to-pdf-no-header', url], { timeoutMs: 5 * 60 * 1000 })
       try {
         const t = await fs.resolve(pdfPath); const info = await fs.stat(t)
         if (!info) return { ok: false, message: 'PDF 生成失败：' + pickStdout(res).slice(0, 200) }
@@ -1318,7 +1319,7 @@ return {
         const mdPath = joinPath(outdir, safeTitle + '.md'); const docxPath = joinPath(outdir, safeTitle + '.docx')
         await writeTextFile(mdPath, md)
         const scriptPath = joinPath(dir, 'scripts', 'export_docx.py')
-        const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + mdPath + '" "' + docxPath + '" "' + proj.title.replace(/"/g, '') + '"' }))
+        const res = await shell.runFile(await pythonExe(), [scriptPath, mdPath, docxPath, proj.title.replace(/"/g, '')], { timeoutMs: 5 * 60 * 1000 })
         const ok = /OK/.test(pickStdout(res))
         if (!ok) return { ok: false, message: 'Word 导出失败：' + pickStdout(res).slice(0, 300) + stderrOf(res).slice(0, 300) }
         try {
@@ -1340,7 +1341,7 @@ return {
       const tmpDir = joinPath(dir, 'projects', 'tmp', id); await ensureDir(tmpDir)
       await writeTextFile(joinPath(tmpDir, 'upload.b64'), String(args.base64))
       const scriptPath = joinPath(dir, 'scripts', 'ingest_file.py'); const safeName = String(args.fileName).replace(/"/g, '')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + joinPath(tmpDir, 'upload.b64') + '" "' + tmpDir + '" "' + safeName + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, joinPath(tmpDir, 'upload.b64'), tmpDir, safeName], { timeoutMs: 5 * 60 * 1000 })
       let text = ''
       try { const t = await fs.resolve(joinPath(tmpDir, 'extracted.txt')); const st = await fs.stat(t); if (st) text = await readTextTolerant(t) } catch (e) { text = '' }
       if (!text || text.length < 30) {
@@ -1366,7 +1367,7 @@ return {
       proj.bidTerms = { deliveryText: String(rawTerms.deliveryText || '').slice(0, 300), deliveryDays: parseInt(rawTerms.deliveryDays, 10) > 0 ? parseInt(rawTerms.deliveryDays, 10) : 0, deliveryDate: String(rawTerms.deliveryDate || '').slice(0, 20), place: String(rawTerms.place || '').slice(0, 200), warranty: String(rawTerms.warranty || '').slice(0, 300), payment: String(rawTerms.payment || '').slice(0, 300) }
       proj.bidMatrix = reqs.filter((r) => r && r.requirement).slice(0, 150).map((r, i) => ({ no: String(r.no || (i + 1)), chapter: String(r.chapter || ''), requirement: String(r.requirement).slice(0, 1000), category: String(r.category || '技术').slice(0, 10), answer: '', status: 'pending' }))
       await updateStatus(proj); await writeProj(proj)
-      try { if (shell) await shell.run(shell.resolve({ command: 'Remove-Item -Force -Recurse "' + tmpDir.replace(/"/g, '\\"') + '" -ErrorAction SilentlyContinue' })) } catch (e) {}
+      try { await fs.rm(tmpDir) } catch (e) {}
       return { ok: true, project: proj, count: proj.bidMatrix.length, terms: proj.bidTerms }
     }
     async function bidAnswer(args) {
@@ -1442,7 +1443,7 @@ return {
       const dataPath = joinPath(outdir, safeTitle + '-slides.json'); const pptxPath = joinPath(outdir, safeTitle + '.pptx')
       await writeJson(dataPath, { slides: slides })
       const scriptPath = joinPath(dir, 'scripts', 'export_pptx.py')
-      const res = await shell.run(shell.resolve({ command: 'python "' + scriptPath + '" "' + dataPath + '" "' + pptxPath + '" "' + theme + '" "' + title.replace(/"/g, '') + '"' }))
+      const res = await shell.runFile(await pythonExe(), [scriptPath, dataPath, pptxPath, theme, title.replace(/"/g, '')], { timeoutMs: 5 * 60 * 1000 })
       const ok = /OK/.test(pickStdout(res))
       if (!ok) return { ok: false, message: 'PPTX 导出失败：' + pickStdout(res).slice(0, 300) + stderrOf(res).slice(0, 300) }
       try {
@@ -1468,7 +1469,7 @@ return {
     }
     async function pythonVersion() {
       if (!shell) return ''
-      try { const res = await shell.run(shell.resolve({ command: 'python --version 2>&1' })); return pickStdout(res).trim() } catch (e) { return '' }
+      try { const res = await shell.runFile(await pythonExe(), ['--version']); return pickStdout(res).trim() } catch (e) { return '' }
     }
     async function envCheck() {
       const python = await checkExecutable('python')
