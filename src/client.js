@@ -719,7 +719,8 @@ return {
         const attempt = (n) => {
           rpc('docsuite/state/summary').then((r) => {
             if (cancelled) return
-            if (r && r.ok) setSum(r)
+            // 兼容: 部分端点响应无 ok 字段（如 summary 旧版），按数据字段判断成功
+            if (r && (r.ok || r.kbItems !== undefined)) setSum(r)
             else if (n < 3) setTimeout(() => attempt(n + 1), 3000)
             else setErr((r && r.message) || '加载失败')
           }).catch((e) => {

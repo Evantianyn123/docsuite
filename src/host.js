@@ -1618,7 +1618,7 @@ return {
 
     async function summary() {
       const dir = await dataDir(); const cfg = await getConfig()
-      return { dataDir: dir, kbItems: await countJsonFiles(joinPath(dir, 'kb', 'items')), projects: await countJsonFiles(joinPath(dir, 'projects')), templates: await countJsonFiles(joinPath(dir, 'templates', 'learned')) + await countJsonFiles(joinPath(dir, 'templates', 'manual')), language: cfg.language || 'zh' }
+      return { ok: true, dataDir: dir, kbItems: await countJsonFiles(joinPath(dir, 'kb', 'items')), projects: await countJsonFiles(joinPath(dir, 'projects')), templates: await countJsonFiles(joinPath(dir, 'templates', 'learned')) + await countJsonFiles(joinPath(dir, 'templates', 'manual')), language: cfg.language || 'zh' }
     }
     async function findFirst(paths) {
       if (!fs) return undefined
