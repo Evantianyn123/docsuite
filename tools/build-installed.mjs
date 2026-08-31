@@ -151,11 +151,13 @@ function validateId(id, label) {
 }
 function sanitizeFileName(name, allowed) {
   const exts = allowed || ALLOWED_UPLOAD_EXTS
-  let base = basename(String(name || '').replace(/[\u0000-\u001f]/g, ''))
-  base = base.replace(/\s+$/g, '').replace(/\.+$/g, '')
+  // 注意：HOST_PRELUDE 是模板字符串，正则里的反斜杠会被吞（如 u s . 等转义），
+  // 必须写双反斜杠（\\\\u、\\\\s、\\\\.）才能生成正确正则
+  let base = basename(String(name || '').replace(/[\\u0000-\\u001f]/g, ''))
+  base = base.replace(/\\s+$/g, '').replace(/\\.+$/g, '')
   if (!base || base === '.' || base === '..') { const e = new Error('文件名非法'); e.code = 'BAD_FILE_NAME'; throw e }
   if (base.includes(':')) { const e = new Error('文件名含非法字符(:)'); e.code = 'BAD_FILE_NAME'; throw e }
-  const stem = base.replace(/\.[^.]+$/, '')
+  const stem = base.replace(/\\.[^.]+$/, '')
   if (WINDOWS_RESERVED_RE.test(stem)) { const e = new Error('Windows 保留文件名'); e.code = 'BAD_FILE_NAME'; throw e }
   const ext = extname(base).toLowerCase()
   if (!exts.includes(ext)) { const e = new Error('不支持的文件类型: ' + (ext || '(无扩展名)')); e.code = 'BAD_FILE_TYPE'; throw e }
@@ -494,5 +496,13 @@ const CLIENT_MID = `
 const clientOut = CLIENT_PRELUDE + clientBody + '\n' + clientTail + CLIENT_MID
 write('lib/client.js', clientOut)
 console.log('[build] client: lib/client.js 生成 (' + clientOut.split('\n').length + ' 行)')
+
+// 构建期断言：模板字符串可能吞掉正则反斜杠（\u \s \. 等），生成后校验关键正则完整性
+const HOST_OUT = read('lib/index.js')
+const REGEX_CHECKS = ['[\\u0000-\\u001f]', '/\\s+$/', '/\\.+$/', '/\\.[^.]+$/']
+for (const rx of REGEX_CHECKS) {
+  if (!HOST_OUT.includes(rx)) throw new Error('[build] HOST 产物缺少正则: ' + rx + ' —— 模板字符串转义被破坏，请检查 build.mjs 中的双反斜杠')
+}
+console.log('[build] 正则完整性校验通过')
 
 console.log('[build] 完成')
