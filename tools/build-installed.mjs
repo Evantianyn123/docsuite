@@ -51,7 +51,7 @@ const execFileAsync = promisify(execFile)
 function dshHomeDir() { return process.env.DSH_HOME || join(os.homedir(), '.dsh') }
 function bootstrapPath() { return join(dshHomeDir(), 'docsuite-bootstrap.json') }
 function migrationStatePath() { return join(dshHomeDir(), 'docsuite-migration.json') }
-async function readJsonFileSafe(absPath) { try { return JSON.parse(await readFile(absPath, 'utf8')) } catch (e) { return null } }
+async function readJsonFileSafe(absPath) { try { return JSON.parse((await readFile(absPath, 'utf8')).replace(/^\uFEFF/, '')) } catch (e) { return null } }
 async function writeJsonAtomic(absPath, obj) {
   await fsMkdir(dirname(absPath), { recursive: true })
   const tmp = absPath + '.tmp-' + Math.random().toString(36).slice(2, 8)
@@ -64,7 +64,14 @@ async function clearBootstrap() { await fsRm(bootstrapPath(), { force: true }) }
 async function readMigrationState() { return readJsonFileSafe(migrationStatePath()) }
 async function writeMigrationState(s) { await writeJsonAtomic(migrationStatePath(), s) }
 async function clearMigrationState() { await fsRm(migrationStatePath(), { force: true }) }
-async function dirUsable(p) { try { const st = await fsStat(p); return !!st && st.type === 'directory' } catch (e) { return false } }
+async function dirUsable(p) {
+  try {
+    const st = await fsStat(p)
+    if (!st) return false
+    // node fs.promises.stat 返回 Stats（isDirectory() 方法）；兼容 {type} 形态
+    return typeof st.isDirectory === 'function' ? st.isDirectory() : st.type === 'directory'
+  } catch (e) { return false }
+}
 function sha256Hex(data) { return createHash('sha256').update(data).digest('hex') }
 async function sha256File(p) { return sha256Hex(await readFile(p)) }
 async function walkFiles(dir, base) {

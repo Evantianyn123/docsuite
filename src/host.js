@@ -49,7 +49,7 @@ return {
     }
     async function readJson(absPath) {
       if (!fs) return undefined
-      try { const target = await fs.resolve(absPath); const info = await fs.stat(target); if (!info) return undefined; return JSON.parse(await fs.readText(target)) } catch (e) { return undefined }
+      try { const target = await fs.resolve(absPath); const info = await fs.stat(target); if (!info) return undefined; return JSON.parse((await fs.readText(target)).replace(/^\uFEFF/, '')) } catch (e) { return undefined }
     }
     async function writeTextFile(absPath, content) {
       if (!fs) return
