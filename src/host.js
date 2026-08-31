@@ -166,8 +166,9 @@ return {
     async function dataDir() {
       await ensureRootInit()
       if (rootInitError) throw rootInitError
-      const cfg = await getConfig()
-      return (cfg.dataDir && String(cfg.dataDir)) || rootDir
+      // v5: bootstrap/rootDir 是数据位置的唯一权威（config.json 的 dataDir 仅为冗余记录，
+      // 迁移复制的 config.json 可能携带旧路径，不能让它覆盖 rootDir）
+      return rootDir
     }
     // F2 v5: config/set 字段白名单 + 深层校验；禁止通过通用配置修改 dataDir/version
     async function saveConfig(patch) {
@@ -196,7 +197,7 @@ return {
         clean.scanDirs = out
       }
       for (const k of ['dataDir', 'version']) { if (p[k] !== undefined) bad('禁止通过通用配置修改 ' + k) }
-      const next = Object.assign({}, cur, clean); await ensureDir(rootDir); await writeJson(CONFIG_PATH, next); return next
+      const next = Object.assign({}, cur, clean, { dataDir: rootDir }); await ensureDir(rootDir); await writeJson(CONFIG_PATH, next); return next
     }
     // F2: 统一数据路径入口（safeJoin 边界校验 + 符号链接/联接检查，带缓存）
     async function dataPath(...parts) {
@@ -1108,6 +1109,14 @@ return {
         // 更新 bootstrap（原子）
         await writeBootstrap(targetNorm, { operationId })
         await writeMigrationState({ operationId, source, staging, target: targetNorm, phase: 'SWITCHED', prevBootstrap: prevBootstrap, startedAt: (await readMigrationState()).startedAt })
+        // 修正目标 config.json 的冗余 dataDir 字段（复制的 config.json 可能携带旧路径）
+        try {
+          const tCfg = await readJson(joinPath(targetNorm, 'config.json'))
+          if (tCfg && typeof tCfg === 'object') {
+            tCfg.dataDir = targetNorm
+            await writeTextFile(joinPath(targetNorm, 'config.json'), JSON.stringify(tCfg, null, 2))
+          }
+        } catch (e3) {}
         // 当前进程验证: 读目标 config / 列 items
         try {
           const cfg = await readJsonFileSafe(joinPath(targetNorm, 'config.json'))
@@ -1634,7 +1643,7 @@ return {
     }
     async function health() {
       const cfg = await getConfig()
-      return { ok: true, name: 'DocSuite', version: cfg.version || 1, dataDir: cfg.dataDir || rootDir, workspaceRoot: workspaceRoot || null }
+      return { ok: true, name: 'DocSuite', version: cfg.version || 1, dataDir: rootDir, workspaceRoot: workspaceRoot || null }
     }
 
     const cleanups = []
