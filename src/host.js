@@ -557,8 +557,11 @@ return {
     async function llmText(route, system, userPrompt, maxTokens) {
       const textParts = []; const reasonParts = []; let failed = null
       try {
+        // reasoningEffort: 'low' —— deepseek 适配器默认 high 推理，复杂文档会把 token 预算
+        // 全部烧在推理上导致正文为空（enrich 曾两次只出 reasoning 无 text）。用 low 有界推理，
+        // 保证剩余预算留给最终答案。maxTokens 默认 16000 兜底。
         const stream = llm.stream({
-          provider: route.provider, model: route.model, temperature: 0.2, maxTokens: maxTokens || 2000, system: system,
+          provider: route.provider, model: route.model, reasoningEffort: 'low', temperature: 0.2, maxTokens: maxTokens || 16000, system: system,
           messages: [{ id: 'docsuite-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8), role: 'user', content: [{ type: 'text', text: userPrompt }], source: { kind: 'user' } }],
         })
         for await (const chunk of stream) {
@@ -626,7 +629,7 @@ return {
       const kindName = KIND_NAMES[args.docKind] || '技术文档'
       const system = '你是文档结构分析专家。你擅长从历史文档中归纳章节结构、层级关系和写作风格。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '请分析以下' + kindName + '文档，归纳章节结构（含层级）sections，并总结写作风格 style（语气/表格偏好/典型图表/篇幅/其他）。\n输出 JSON：{"sections": [{"title": "章节标题", "desc": "要点", "children": []}], "style": {"tone": "", "tablePreference": "", "typicalCharts": [], "lengthPerSection": "", "writingStyle": ""}}\n\n文档文本（前 30000 字符）：\n' + text.slice(0, 30000)
-      const res2 = await llmText(route, system, userPrompt, 8000)
+      const res2 = await llmText(route, system, userPrompt, 16000)
       if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
       const effective = res2.text || res2.reasoning || ''
       const parsed = parseModelJson(effective) || parseModelJson(res2.reasoning || '') || parseModelJson(res2.text || '')
@@ -877,14 +880,14 @@ return {
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是水下机器人（ROV/AUV）领域的资深技术文档分析助手。你擅长识别不同型号并提取结构化技术参数、撰写精炼摘要。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '识别文档中所有型号，为每个型号分别提取关键技术参数（8-20 项：工作频率、探测范围、量程、精度、分辨率、功耗、工作电压、接口、工作深度、耐压等级等）并各写 2-3 句中文摘要。\n【重要】文档中可能包含「表格数据」：表格用 | 分隔每行的各列，同一行各列表示【同一个型号】的一组参数（第一行常为表头，如：型号|参数1|参数2|...）。请严格按表格的行列对应关系识别每个型号及其参数，确保参数归属到正确的型号，不要张冠李戴；正文中提及的参数也要并入对应型号。\n设备名称：' + (item.name || '') + '\n厂家：' + (item.manufacturer || '') + '\n\n输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类（传感器归入 导航定位|通信遥测|能源电池|通用设备，执行单元如 推进器/机械爪/云台/灯组 归入 推进动力|作业工具，也可用更具体的自定义分类如 声呐|深度计|推进器|机械手），其他不匹配归 其他", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}\n\n说明书文本（含表格，| 分隔每行各列）：\n' + text
-      const res = await llmText(route, system, userPrompt, 9000)
+      const res = await llmText(route, system, userPrompt, 16000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const effective = res.text || res.reasoning || ''
       let parsed = parseModelJson(effective)
       if (!parsed) {
         // 自动重试一次：模型可能只输出思考/夹带文字而未输出 JSON，带纠错提示重新调用
         const retryPrompt = '你上次的回答没有包含有效的 JSON，无法解析。请重新回答并严格遵守：只输出一个 JSON 对象，不要输出任何解释、思考过程、Markdown 代码块或其他文字。注意按表格（| 分隔）的行列对应关系确保参数归属正确型号。\n\n设备名称：' + (item.name || '') + '\n\n你上次的回答：\n' + effective.slice(0, 3000) + '\n\n请只输出 JSON：{"models": [{"model": "型号标识", "name": "产品名称", "category": "分类", "params": [{"name": "参数名", "value": "数值", "unit": "单位", "desc": "说明"}], "summary": "2-3句中文摘要"}]}'
-        const res2 = await llmText(route, system, retryPrompt, 6000)
+        const res2 = await llmText(route, system, retryPrompt, 12000)
         if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
         const effective2 = res2.text || res2.reasoning || ''
         parsed = parseModelJson(effective2)
@@ -1061,7 +1064,7 @@ return {
       } else {
         userPrompt = '请为以下' + kindName + '设计章节大纲（总章节数 8-30 个，叶子章节要具体可写）。\n标题：' + proj.title + '\n主题描述：' + (proj.topic || '（无）') + machine + tplRef + '\n\n输出 JSON：{"outline": [{"title": "1 章节标题", "desc": "本节要点", "children": [{"title": "1.1 子章节", "desc": "要点", "children": []}]}]}'
       }
-      const res = await llmText(route, system, userPrompt, 4000)
+      const res = await llmText(route, system, userPrompt, 8000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const parsed = parseModelJson(res.text || res.reasoning || '')
       if (!parsed || !Array.isArray(parsed.outline)) return { ok: false, message: '模型输出解析失败，请重试' }
@@ -1098,7 +1101,7 @@ return {
       if (proj.templateRef) { const t = await findTemplate(proj.templateRef); if (t) tplRef = '\n可参考的整体模板章节结构（可选）：\n' + JSON.stringify(t.sections).slice(0, 2000) }
       let system = '你是资深' + kindName + '撰写专家。你擅长从需求文档/参考资料中提炼文档大纲。你的回答必须只包含一个 JSON 对象。'
       let userPrompt = '请阅读以下需求文档/参考资料，为「' + proj.title + '」设计章节大纲（总章节数 8-30 个，叶子章节要具体可写，覆盖文档中的关键内容）。\n文档标题：' + proj.title + '\n主题描述：' + (proj.topic || '（无）') + machine + tplRef + '\n\n文档内容（前 40000 字符）：\n' + text.slice(0, 40000) + '\n\n输出 JSON：{"outline": [{"title": "1 章节标题", "desc": "本节要点", "children": [{"title": "1.1 子章节", "desc": "要点", "children": []}]}]}'
-      const res2 = await llmText(route, system, userPrompt, 5000)
+      const res2 = await llmText(route, system, userPrompt, 10000)
       if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
       const parsed = parseModelJson(res2.text || res2.reasoning || '')
       if (!parsed || !Array.isArray(parsed.outline)) return { ok: false, message: '模型输出解析失败，请重试' }
@@ -1182,7 +1185,7 @@ return {
       const langHint = proj.lang === 'en' ? 'Write in English.' : '用中文撰写。'
       const system = '你是资深' + kindName + '撰写专家。你撰写的章节内容专业、详实、结构清晰，严格遵循已确定的机器人边界参数。只输出章节正文 Markdown，不要输出章节标题。'
       const userPrompt = '请撰写章节「' + node.title + '」。\n本节要点：' + (node.desc || '（无）') + '\n项目主题：' + proj.title + ' - ' + (proj.topic || '') + (proj.machineType ? '\n机型：' + proj.machineType : '') + (specText ? '\n\n【已确定的机器人边界（撰写时须严格遵循，不得与之矛盾）】\n' + specText : '') + kbText + '\n\n要求：' + langHint + ' 使用 Markdown 格式（可用小标题、列表、表格），内容 400-900 字，专业且具体；引用知识库资料时在正文后标注 [出处：资料名]。'
-      const res = await llmText(route, system, userPrompt, 3000)
+      const res = await llmText(route, system, userPrompt, 8000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const content = (res.text || res.reasoning || '').trim()
       if (!content) return { ok: false, message: '模型未返回内容' }
@@ -1352,7 +1355,7 @@ return {
       const route = await modelRoute(); if (!route) return { ok: false, message: '未找到可用模型路由' }
       const system = '你是招投标文件分析专家。你擅长从招标文件中提取技术要求、商务要求、投标文件编制要求与关键交付条款。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '请从以下招标文件文本中提取信息，输出 JSON：\n1. structure（投标文件编制要求）：{"compileRequirement": "招标文件对投标文件的组成、编制顺序、排版/格式要求的原文要点，没有则空字符串", "sections": []}\n2. terms（商务关键条款）：{"deliveryText": "交货期原文", "deliveryDays": 交货天数（无法确定则 0）, "deliveryDate": "固定日期（无则空）", "place": "交货地点", "warranty": "质保期", "payment": "付款方式"}\n3. requirements（要求清单，技术/商务/资质/交付/验收均有）：[{"no": "1", "chapter": "来源条款号", "requirement": "要求原文", "category": "技术|商务|资质|交付|验收"}]\n\n招标文件文本（前 40000 字符）：\n' + text.slice(0, 40000)
-      const res2 = await llmText(route, system, userPrompt, 8000)
+      const res2 = await llmText(route, system, userPrompt, 16000)
       if (!res2.ok) return { ok: false, message: '模型调用失败：' + res2.message }
       const parsed = parseModelJson(res2.text || res2.reasoning || '')
       if (!parsed) return { ok: false, message: '要求解析失败，请重试' }
@@ -1376,7 +1379,7 @@ return {
       if (kb && kb.items && kb.items.length) { refIds = kb.items.map((it) => it.id); kbText = '\n\n可参考知识库：\n' + kb.items.map((it) => '- [' + it.name + ']：' + (it.summary || '') + '；参数：' + (it.params || []).slice(0, 6).map((pp) => pp.name + ' ' + (pp.value || '') + (pp.unit || '')).join('、')).join('\n') }
       const system = '你是投标技术文件撰写专家。你撰写的应答专业、具体、以事实和数据支撑。只输出应答正文。'
       const userPrompt = '请对以下招标要求撰写投标应答（100-300 字，说明我方如何满足要求，给出具体指标/方案）。\n招标要求（' + row.category + '）：' + row.requirement + '\n来源：' + (row.chapter || '') + '\n项目：' + proj.title + '\n主题：' + proj.topic + kbText + '\n\n请以「响应：」开头表示完全满足（无偏离）；若我方指标优于或超出招标要求，以「正偏离：」开头并说明超出内容；若无法完全满足（部分满足或达不到），以「负偏离：」开头并说明偏离项与理由；完全不适用时以「不适用：」开头。'
-      const res = await llmText(route, system, userPrompt, 1500)
+      const res = await llmText(route, system, userPrompt, 4000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const answer = (res.text || res.reasoning || '').trim()
       if (!answer) return { ok: false, message: '模型未返回内容' }
@@ -1396,7 +1399,7 @@ return {
       const deliveryText = terms.deliveryText || (deliveryDays + ' 天')
       const system = '你是投标项目管理专家，精通项目进度计划编制。你设计的进度安排合理、可执行、完全满足交货期约束。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '请为以下投标项目设计时间节点安排（阶段 10-15 个），总工期不得超过交货期 ' + deliveryDays + ' 天。\n项目：' + proj.title + '\n交货要求：' + deliveryText + '\n\n阶段须覆盖：合同签订、技术联络/方案确认、详细设计、物料采购、生产制造、集成装配、出厂测试(FAT)、包装发运、现场安装、现场调试(SAT)、操作培训、试运行、最终验收。\n注意：出厂测试应安排在交货前留出发运与安装时间；最终验收必须在交货期内完成。\n\n输出 JSON：{"stages": [{"phase": "阶段名称", "offsetDays": 相对合同签订日的开始天数（整数）, "durationDays": 持续天数, "desc": "工作内容（30-80字）"}]}\n要求：第一个阶段 offsetDays=0；各阶段按时间顺序排列、尽量衔接；最后一个阶段结束日 = offsetDays + durationDays 不得超过 ' + deliveryDays + '。'
-      const res = await llmText(route, system, userPrompt, 5000)
+      const res = await llmText(route, system, userPrompt, 10000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const parsed = parseModelJson(res.text || res.reasoning || '')
       if (!parsed || !Array.isArray(parsed.stages) || !parsed.stages.length) return { ok: false, message: '进度计划解析失败，请重试' }
@@ -1420,7 +1423,7 @@ return {
       if (!bodyText) return { ok: false, message: '项目尚无章节内容，请先在文档工坊生成章节' }
       const system = '你是演示文稿设计专家。你擅长从技术文档中提炼精炼的演示要点。你的回答必须只包含一个 JSON 对象。'
       const userPrompt = '请根据以下文档内容设计演示文稿（8-15 页）。\n第 1 页为封面：title=文档标题，bullets=[一句话主题概述]。\n其余页：每页 title（简短有力）+ bullets（3-6 条要点，每条 10-30 字，概括核心内容；含关键数据的用「参数名 数值 单位」表达）。\n若某部分有明显表格数据（如参数对比、时间节点），可给 table: {"headers": [...], "rows": [[...]]}。\n\n文档标题：' + proj.title + '\n\n文档内容：\n' + bodyText.slice(0, 12000) + '\n\n输出 JSON：{"slides": [{"title": "页标题", "bullets": ["要点1", "要点2"], "table": {"headers": [], "rows": []}}]}'
-      const res = await llmText(route, system, userPrompt, 5000)
+      const res = await llmText(route, system, userPrompt, 10000)
       if (!res.ok) return { ok: false, message: '模型调用失败：' + res.message }
       const parsed = parseModelJson(res.text || res.reasoning || '')
       if (!parsed || !Array.isArray(parsed.slides) || !parsed.slides.length) return { ok: false, message: '幻灯片内容解析失败，请重试' }
