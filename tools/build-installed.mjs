@@ -298,7 +298,10 @@ window.__ModuleLoader__.load({
       return v;
     }
     function rpc(method, args) {
-      return fetch('/docsuite/' + method, {
+      // 业务体传入的 method 已含 'docsuite/' 前缀（全部调用都是 rpc('docsuite/xxx')），
+      // 不能再拼一次 /docsuite/（否则变成 /docsuite/docsuite/... 404）。带 '/' 的按完整路径。
+      var url = method.indexOf('/') >= 0 ? '/' + method : '/docsuite/' + method;
+      return fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(args === undefined ? {} : stripUndefined(args)),
