@@ -1074,10 +1074,10 @@ return {
       if (relT !== '' && relT !== '..' && !relT.startsWith('..' + sep) && !isAbsolute(relT)) return { ok: false, message: '目标目录不能位于当前数据目录内部' }
       const relS = relative(targetNorm, source)
       if (relS !== '' && relS !== '..' && !relS.startsWith('..' + sep) && !isAbsolute(relS)) return { ok: false, message: '目标目录不能是当前数据目录的祖先' }
-      // workspaceRoot 可写约束
+      // v5: 安装式插件拥有完整 Node 权限（无沙箱），目标不限 workspaceRoot；
+      // 仅禁止 target == workspaceRoot（把整个工作区当数据目录会污染工作区）
       const wsRoot = workspaceRoot ? String(workspaceRoot).replace(/[\\/]+$/, '') : ''
-      const okTarget = !wsRoot || targetNorm.toLowerCase() === wsRoot.toLowerCase() || targetNorm.toLowerCase().startsWith(wsRoot.toLowerCase() + '\\') || targetNorm.toLowerCase().startsWith(wsRoot.toLowerCase() + '/')
-      if (!okTarget) return { ok: false, message: '目标目录不在工作区根 ' + wsRoot + ' 内，请选择其下目录作为新数据目录' }
+      if (wsRoot && targetNorm.toLowerCase() === wsRoot.toLowerCase()) return { ok: false, message: '目标目录不能等于工作区根 ' + wsRoot + '，请选择其下（或任意位置）的一个子目录' }
       // 第一阶段: 目标必须不存在或为空
       const tInfo = await fs.stat(targetNorm)
       if (tInfo) {
