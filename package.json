@@ -22,8 +22,7 @@
     }
   },
   "scripts": {
-    "build": "node build.mjs",
-    "prepare": "node build.mjs"
+    "build": "node build.mjs"
   },
   "files": [
     "lib",
