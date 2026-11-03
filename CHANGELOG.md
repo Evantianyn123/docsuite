@@ -2,6 +2,12 @@
 
 版本号约定：DSH 动态插件内不可变包 `pkg-N` ↔ 本仓库 git tag `pkg-N`。
 
+## 0.1.0-poc.1 — 安装式插件包（2026-11-03）
+- 新增 `package.json` / `build.mjs` / `cordis.patch.yml`，仓库成为可直接安装的 DSH 插件包
+- `prepare` 钩子：pnpm 安装 git 依赖时自动从 `src/` 构建 `lib/`，无需提交构建产物
+- `files` 白名单：只打包 lib / src / cordis.patch.yml / README
+- 支持四种安装方式：npm 包名 / Git 地址 / tgz 压缩包 / 本地绝对路径
+
 ## pkg-12 — M5 增强（当前，tag `pkg-12`）
 - 网页抓取入库：web.search/fetch + HTML 清洗 + AI 抽取，一键导入知识库
 - OCR：扫描件 PDF 自动识别（PyMuPDF 渲染 + RapidOCR），支持手动重新识别

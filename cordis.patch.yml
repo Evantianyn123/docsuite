@@ -1,0 +1,4 @@
+# DocSuite bundle patch：注册 docsuite 插件行
+- insert:
+    - id: docsuite
+      name: 'docsuite'

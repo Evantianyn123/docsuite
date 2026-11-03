@@ -1,5 +1,11 @@
 # DocSuite 文档工坊
 
+> **可安装包（2026-11-03 起）**：本仓库同时是一个可直接安装的 DSH 插件包。在 DSH 侧边栏
+> **插件 → 添加插件** 里填 `git+https://github.com/Evantianyn123/docsuite.git` 即可安装；
+> 安装时由 `prepare` 钩子自动执行 `node build.mjs`，从 `src/` 生成 `lib/`，所以仓库里不需要提交构建产物。
+> 也可以把 `npm pack` 出的 tgz 发给别人，或在插件页填本地绝对路径。
+> 下文是动态插件时代的开发与版本管理说明。
+
 水下机器人（ROV/AUV）技术文档工作台 —— DSH（DeepSeek Harness）动态 Cordis 插件。
 
 - 知识库：说明书上传解析（PDF/Word/TXT）、AI 参数抽取、多型号拆分、网页抓取、OCR、全文检索、多型号对比
